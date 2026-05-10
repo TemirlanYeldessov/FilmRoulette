@@ -541,17 +541,19 @@ export default function CatalogScreen({ navigation }: any) {
   return (
     <LinearGradient colors={['#0f0f1a', '#1a1a2e']} style={styles.container}>
       <View style={styles.header}>
-        <View style={styles.switcher}>
-          <TouchableOpacity style={[styles.switchBtn, mediaType === 'movie' && styles.switchBtnActive]} onPress={() => { setMediaType('movie'); setSelectedGenres([0]); }}>
-            <Ionicons name="film" size={16} color={mediaType === 'movie' ? '#fff' : '#666'} />
-            <Text style={[styles.switchText, mediaType === 'movie' && styles.switchTextActive]}>Фильмы</Text>
-          </TouchableOpacity>
+        {!isSearchMode && (
+          <View style={styles.switcher}>
+            <TouchableOpacity style={[styles.switchBtn, mediaType === 'movie' && styles.switchBtnActive]} onPress={() => { setMediaType('movie'); setSelectedGenres([0]); }}>
+              <Ionicons name="film" size={16} color={mediaType === 'movie' ? '#fff' : '#666'} />
+              <Text style={[styles.switchText, mediaType === 'movie' && styles.switchTextActive]}>Фильмы</Text>
+            </TouchableOpacity>
 
-          <TouchableOpacity style={[styles.switchBtn, mediaType === 'tv' && styles.switchBtnActive]} onPress={() => { setMediaType('tv'); setSelectedGenres([0]); }}>
-            <Ionicons name="tv" size={16} color={mediaType === 'tv' ? '#fff' : '#666'} />
-            <Text style={[styles.switchText, mediaType === 'tv' && styles.switchTextActive]}>Сериалы</Text>
-          </TouchableOpacity>
-        </View>
+            <TouchableOpacity style={[styles.switchBtn, mediaType === 'tv' && styles.switchBtnActive]} onPress={() => { setMediaType('tv'); setSelectedGenres([0]); }}>
+              <Ionicons name="tv" size={16} color={mediaType === 'tv' ? '#fff' : '#666'} />
+              <Text style={[styles.switchText, mediaType === 'tv' && styles.switchTextActive]}>Сериалы</Text>
+            </TouchableOpacity>
+          </View>
+        )}
 
         <View style={styles.searchRow}>
           <View style={styles.searchInputWrap}>

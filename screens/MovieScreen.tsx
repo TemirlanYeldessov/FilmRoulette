@@ -4,7 +4,6 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { useEffect, useState } from 'react';
 import {
   ActivityIndicator,
-  Dimensions,
   Linking,
   Modal,
   ScrollView,
@@ -14,12 +13,10 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
-import WebView from 'react-native-webview';
 import { MovieDetailSkeleton } from '../components/Skeleton';
 import { useAppContext, UserMovieStatus } from '../store/AppContext';
 
 const TOKEN = 'eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiI4ZDRjMGIyYjJmNWZiZDMxOWMzNTU4OTU2YmFhOTZiZiIsIm5iZiI6MTc3ODMxOTAzMS45NjMsInN1YiI6IjY5ZmVmZWI3ZmQ3NjliZmExZTFlMDk0MSIsInNjb3BlcyI6WyJhcGlfcmVhZCJdLCJ2ZXJzaW9uIjoxfQ.uJTLQyX-dOE5DG4Zjim4bYRIMx3OeEfHDk6Rz0z1WNA';
-const { width } = Dimensions.get('window');
 const relatedPosterWidth = 104;
 
 const ONLINE_SOURCES = [
@@ -212,7 +209,6 @@ export default function MovieScreen({ route, navigation }: any) {
   const [skeletonVisible, setSkeletonVisible] = useState(false);
   const [error, setError] = useState('');
   const [showOnline, setShowOnline] = useState(false);
-  const [showTrailer, setShowTrailer] = useState(false);
   const {
     addToWatchlist,
     removeFromWatchlist,
@@ -270,20 +266,6 @@ export default function MovieScreen({ route, navigation }: any) {
     Linking.openURL(`https://www.youtube.com/watch?v=${movie.trailerKey}`);
   };
 
-  const openExternal = (service: 'tmdb' | 'imdb' | 'kinopoisk') => {
-    if (service === 'tmdb') {
-      Linking.openURL(`https://www.themoviedb.org/${movie.mediaType}/${movie.id}`);
-      return;
-    }
-
-    if (service === 'imdb' && movie.imdbId) {
-      Linking.openURL(`https://www.imdb.com/title/${movie.imdbId}/`);
-      return;
-    }
-
-    Linking.openURL(`https://www.kinopoisk.ru/index.php?kp_query=${encodeURIComponent(title)}`);
-  };
-
   const openSource = async (source: typeof ONLINE_SOURCES[0]) => {
     setShowOnline(false);
     const sourceTitle = movie.titleEn || movie.titleRu;
@@ -307,7 +289,6 @@ export default function MovieScreen({ route, navigation }: any) {
     setLoadingNext(true);
     setSkeletonVisible(true);
     setError('');
-    setShowTrailer(false);
 
     try {
       const next = await fetchRandom(movie.genreId, movie.mediaType, recentRandomIds);
@@ -324,7 +305,6 @@ export default function MovieScreen({ route, navigation }: any) {
   const openRelated = async (item: any) => {
     setSkeletonVisible(true);
     setError('');
-    setShowTrailer(false);
 
     try {
       const details = await fetchFullDetails(item.id, item.media_type || movie.mediaType);
@@ -462,44 +442,11 @@ export default function MovieScreen({ route, navigation }: any) {
           </View>
         ) : null}
 
-        {movie.trailerKey && !showTrailer && (
-          <TouchableOpacity style={styles.trailerBtn} onPress={() => setShowTrailer(true)}>
+        {movie.trailerKey && (
+          <TouchableOpacity style={styles.trailerBtn} onPress={openTrailerInYouTube}>
             <Ionicons name="play-circle" size={20} color="#fff" />
             <Text style={styles.trailerText}>Смотреть трейлер</Text>
           </TouchableOpacity>
-        )}
-
-        {showTrailer && movie.trailerKey && (
-          <View style={styles.videoContainer}>
-            <WebView
-              source={{
-                uri: `https://www.youtube-nocookie.com/embed/${movie.trailerKey}?playsinline=1&rel=0&modestbranding=1&origin=https://www.youtube.com`,
-                headers: {
-                  Referer: 'https://www.youtube.com/',
-                  Origin: 'https://www.youtube.com',
-                },
-              }}
-              style={styles.video}
-              originWhitelist={['*']}
-              allowsFullscreenVideo
-              mediaPlaybackRequiresUserAction={false}
-              javaScriptEnabled
-              domStorageEnabled
-              thirdPartyCookiesEnabled
-              sharedCookiesEnabled
-              userAgent="Mozilla/5.0 (Linux; Android 10; Mobile) AppleWebKit/537.36 Chrome/120.0 Mobile Safari/537.36"
-            />
-
-            <TouchableOpacity style={styles.closeVideo} onPress={() => setShowTrailer(false)}>
-              <Ionicons name="close-circle" size={20} color="#aaa" />
-              <Text style={styles.closeVideoText}>Закрыть трейлер</Text>
-            </TouchableOpacity>
-
-            <TouchableOpacity style={styles.youtubeFallback} onPress={openTrailerInYouTube}>
-              <Ionicons name="logo-youtube" size={18} color="#e50914" />
-              <Text style={styles.youtubeFallbackText}>Открыть на YouTube</Text>
-            </TouchableOpacity>
-          </View>
         )}
 
         {!movie.trailerKey && (
@@ -511,29 +458,12 @@ export default function MovieScreen({ route, navigation }: any) {
 
         <TouchableOpacity style={styles.onlineBtn} onPress={() => setShowOnline(true)}>
           <Ionicons name="globe-outline" size={20} color="#8888ff" />
-          <Text style={styles.onlineBtnText}>Где смотреть</Text>
+          <Text style={styles.onlineBtnText}>Сервисы просмотра</Text>
         </TouchableOpacity>
-
-        <View style={styles.externalRow}>
-          <TouchableOpacity style={styles.externalBtn} onPress={() => openExternal('tmdb')}>
-            <Text style={styles.externalText}>TMDB</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.externalBtn} onPress={() => openExternal('imdb')}>
-            <Text style={styles.externalText}>IMDb</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.externalBtn} onPress={() => openExternal('kinopoisk')}>
-            <Text style={styles.externalText}>Кинопоиск</Text>
-          </TouchableOpacity>
-        </View>
 
         {movie.recommendations?.length > 0 && (
           <View style={styles.relatedBlock}>
-            <View style={styles.relatedHeader}>
-              <Text style={styles.blockTitle}>Похожие</Text>
-              <TouchableOpacity onPress={() => openRelated(movie.recommendations[0])}>
-                <Text style={styles.relatedAction}>Поискать похожее</Text>
-              </TouchableOpacity>
-            </View>
+            <Text style={styles.blockTitle}>Похожие</Text>
 
             <ScrollView horizontal showsHorizontalScrollIndicator={false}>
               {movie.recommendations.map((item: any) => (
@@ -572,7 +502,7 @@ export default function MovieScreen({ route, navigation }: any) {
         <TouchableOpacity style={styles.modalOverlay} activeOpacity={1} onPress={() => setShowOnline(false)}>
           <View style={styles.sheet}>
             <View style={styles.sheetHandle} />
-            <Text style={styles.sheetTitle}>Где смотреть</Text>
+            <Text style={styles.sheetTitle}>Сервисы просмотра</Text>
             <Text style={styles.sheetSubtitle}>{title} {movie.year ? `(${movie.year})` : ''}</Text>
 
             {movie.providers?.length > 0 && (
@@ -645,22 +575,11 @@ const styles = StyleSheet.create({
   retryText: { color: '#fff', fontSize: 14, fontWeight: '600' },
   trailerBtn: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: '#e50914', paddingHorizontal: 32, paddingVertical: 14, borderRadius: 30, marginBottom: 12 },
   trailerText: { color: '#fff', fontWeight: '700', fontSize: 16 },
-  videoContainer: { width: width - 40, marginBottom: 16 },
-  video: { width: '100%', height: (width - 40) * 0.56, borderRadius: 12, backgroundColor: '#000' },
-  closeVideo: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, marginTop: 8 },
-  closeVideoText: { color: '#aaa', fontSize: 13 },
-  youtubeFallback: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, marginTop: 10 },
-  youtubeFallbackText: { color: '#e50914', fontSize: 13, fontWeight: '600' },
   noTrailer: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: '#1e1e30', paddingHorizontal: 24, paddingVertical: 12, borderRadius: 30, marginBottom: 12 },
   noTrailerText: { color: '#555', fontSize: 14 },
   onlineBtn: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: '#1e1e40', borderWidth: 1, borderColor: '#8888ff', paddingHorizontal: 32, paddingVertical: 14, borderRadius: 30, marginBottom: 12 },
   onlineBtnText: { color: '#8888ff', fontWeight: '700', fontSize: 16 },
-  externalRow: { flexDirection: 'row', gap: 8, marginBottom: 20 },
-  externalBtn: { backgroundColor: '#1e1e30', borderRadius: 16, paddingHorizontal: 14, paddingVertical: 9 },
-  externalText: { color: '#aaa', fontSize: 13, fontWeight: '700' },
   relatedBlock: { width: '100%', marginBottom: 16 },
-  relatedHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
-  relatedAction: { color: '#8888ff', fontSize: 13, fontWeight: '700', marginBottom: 10 },
   relatedCard: { width: relatedPosterWidth, marginRight: 10 },
   relatedPoster: { width: relatedPosterWidth, height: relatedPosterWidth * 1.5, borderRadius: 10, marginBottom: 6 },
   relatedTitle: { color: '#ccc', fontSize: 11, textAlign: 'center' },

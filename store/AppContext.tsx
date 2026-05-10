@@ -94,7 +94,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
   const addRecentRandom = async (id: number, mediaType: string) => {
     const movieKey = keyForMovie(id, mediaType);
-    const next = [movieKey, ...recentRandomIds.filter(k => k !== movieKey)].slice(0, 50);
+    const next = [movieKey, ...recentRandomIds.filter(k => k !== movieKey)].slice(0, 200);
     setRecentRandomIds(next);
     await AsyncStorage.setItem('recentRandomIds', JSON.stringify(next));
   };
