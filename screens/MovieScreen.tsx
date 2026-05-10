@@ -51,50 +51,80 @@ const STATUS_OPTIONS: { key: UserMovieStatus; label: string; icon: any }[] = [
   { key: 'disliked', label: 'Не понравилось', icon: 'thumbs-down-outline' },
 ];
 
+// Injected before page content loads — spoofs Chrome APIs so YouTube doesn't detect WebView
+const CHROME_SPOOF_JS = `
+  (function() {
+    if (!window.chrome) {
+      window.chrome = {
+        runtime: {},
+        loadTimes: function() { return {}; },
+        csi: function() { return {}; },
+        app: {}
+      };
+    }
+    Object.defineProperty(navigator, 'vendor', { get: function() { return 'Google Inc.'; } });
+  })();
+  true;
+`;
+
 function getYouTubeHtml(videoId: string) {
-  return `
-    <!doctype html>
-    <html>
-      <head>
-        <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
-        <style>
-          html, body {
-            margin: 0;
-            padding: 0;
-            width: 100%;
-            height: 100%;
-            background: #000;
-            overflow: hidden;
+  return `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+  <style>
+    * { margin: 0; padding: 0; }
+    html, body { width: 100%; height: 100%; background: #000; overflow: hidden; }
+    #ytplayer { width: 100%; height: 100%; }
+  </style>
+</head>
+<body>
+  <div id="ytplayer"></div>
+  <script>
+    var tag = document.createElement('script');
+    tag.src = 'https://www.youtube.com/iframe_api';
+    document.head.appendChild(tag);
+
+    var player;
+
+    function onYouTubeIframeAPIReady() {
+      player = new YT.Player('ytplayer', {
+        videoId: '${videoId}',
+        playerVars: {
+          autoplay: 1,
+          mute: 1,
+          playsinline: 1,
+          rel: 0,
+          modestbranding: 1,
+          controls: 1,
+          enablejsapi: 1,
+          origin: 'https://www.youtube.com',
+        },
+        events: {
+          onReady: function(e) {
+            e.target.playVideo();
+            setTimeout(function() {
+              try { e.target.unMute(); e.target.setVolume(100); } catch(ex) {}
+            }, 800);
+          },
+          onError: function(e) {
+            if (e.data === 153 || e.data === 150 || e.data === 151 || e.data === 2) {
+              var wrap = document.getElementById('ytplayer');
+              wrap.innerHTML = '';
+              var fr = document.createElement('iframe');
+              fr.src = 'https://www.youtube-nocookie.com/embed/${videoId}?autoplay=1&mute=1&playsinline=1&rel=0&controls=1&enablejsapi=1';
+              fr.style.cssText = 'width:100%;height:100%;border:0;';
+              fr.allow = 'autoplay; fullscreen; encrypted-media';
+              wrap.appendChild(fr);
+            }
           }
-          .container {
-            position: relative;
-            width: 100%;
-            height: 100%;
-          }
-          iframe {
-            position: absolute;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            border: 0;
-          }
-        </style>
-      </head>
-      <body>
-        <div class="container">
-          <iframe
-            id="player"
-            src="https://www.youtube.com/embed/${videoId}?enablejsapi=1&origin=https://www.youtube.com&rel=0&playsinline=1&modestbranding=1"
-            title="YouTube trailer"
-            allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
-            allowfullscreen
-            referrerpolicy="no-referrer">
-          </iframe>
-        </div>
-      </body>
-    </html>
-  `;
+        }
+      });
+    }
+  </script>
+</body>
+</html>`;
 }
 
 async function fetchWithTimeout(url: string, options: any = {}, timeout = 10000) {
@@ -515,13 +545,12 @@ export default function MovieScreen({ route, navigation }: any) {
               mediaPlaybackRequiresUserAction={false}
               javaScriptEnabled={true}
               domStorageEnabled={true}
-              onMessage={(event) => {
-              }}
               mixedContentMode="always"
               thirdPartyCookiesEnabled
               sharedCookiesEnabled
               setSupportMultipleWindows={false}
-              userAgent="Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
+              injectedJavaScriptBeforeContentLoaded={CHROME_SPOOF_JS}
+              userAgent="Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.6099.230 Mobile Safari/537.36"
             />
 
             <TouchableOpacity style={styles.closeVideo} onPress={() => setShowTrailer(false)}>
