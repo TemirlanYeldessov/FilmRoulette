@@ -1,0 +1,48 @@
+{
+  "expo": {
+    "name": "MediaRoulette",
+    "slug": "FilmRoulette",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "newArchEnabled": true,
+    "splash": {
+      "image": "./assets/splash-icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#ffffff"
+    },
+    "ios": {
+      "supportsTablet": true
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#ffffff"
+      },
+      "edgeToEdgeEnabled": true,
+      "predictiveBackGestureEnabled": false,
+      "package": "com.proxyte1996.MediaRoulette"
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      "expo-web-browser",
+      [
+        "expo-speech-recognition",
+        {
+          "microphonePermission": "Разрешите доступ к микрофону для голосового поиска",
+          "speechRecognitionPermission": "Разрешите распознавание речи для голосового поиска"
+        }
+      ],
+      "expo-font"
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "7fc18884-ccdc-416c-8fa2-390248b48d6c"
+      }
+    },
+    "owner": "proxyte1996"
+  }
+}
