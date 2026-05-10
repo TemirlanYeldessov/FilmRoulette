@@ -4,6 +4,7 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { useEffect, useState } from 'react';
 import {
   ActivityIndicator,
+  Dimensions,
   Linking,
   Modal,
   ScrollView,
@@ -13,10 +14,12 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
+import WebView from 'react-native-webview';
 import { MovieDetailSkeleton } from '../components/Skeleton';
 import { useAppContext, UserMovieStatus } from '../store/AppContext';
 
 const TOKEN = 'eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiI4ZDRjMGIyYjJmNWZiZDMxOWMzNTU4OTU2YmFhOTZiZiIsIm5iZiI6MTc3ODMxOTAzMS45NjMsInN1YiI6IjY5ZmVmZWI3ZmQ3NjliZmExZTFlMDk0MSIsInNjb3BlcyI6WyJhcGlfcmVhZCJdLCJ2ZXJzaW9uIjoxfQ.uJTLQyX-dOE5DG4Zjim4bYRIMx3OeEfHDk6Rz0z1WNA';
+const { width } = Dimensions.get('window');
 const relatedPosterWidth = 104;
 
 const ONLINE_SOURCES = [
@@ -47,6 +50,42 @@ const STATUS_OPTIONS: { key: UserMovieStatus; label: string; icon: any }[] = [
   { key: 'liked', label: 'Понравилось', icon: 'thumbs-up-outline' },
   { key: 'disliked', label: 'Не понравилось', icon: 'thumbs-down-outline' },
 ];
+
+function getYouTubeHtml(videoId: string) {
+  return `
+    <!doctype html>
+    <html>
+      <head>
+        <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+        <meta name="referrer" content="strict-origin-when-cross-origin">
+        <style>
+          html, body {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            background: #000;
+            overflow: hidden;
+          }
+          iframe {
+            width: 100%;
+            height: 100%;
+            border: 0;
+          }
+        </style>
+      </head>
+      <body>
+        <iframe
+          src="https://www.youtube.com/embed/${videoId}?playsinline=1&rel=0&modestbranding=1&enablejsapi=1&origin=https://www.youtube.com"
+          title="YouTube trailer"
+          allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+          allowfullscreen
+          referrerpolicy="strict-origin-when-cross-origin">
+        </iframe>
+      </body>
+    </html>
+  `;
+}
 
 async function fetchWithTimeout(url: string, options: any = {}, timeout = 10000) {
   const controller = new AbortController();
@@ -209,6 +248,7 @@ export default function MovieScreen({ route, navigation }: any) {
   const [skeletonVisible, setSkeletonVisible] = useState(false);
   const [error, setError] = useState('');
   const [showOnline, setShowOnline] = useState(false);
+  const [showTrailer, setShowTrailer] = useState(false);
   const {
     addToWatchlist,
     removeFromWatchlist,
@@ -289,6 +329,7 @@ export default function MovieScreen({ route, navigation }: any) {
     setLoadingNext(true);
     setSkeletonVisible(true);
     setError('');
+    setShowTrailer(false);
 
     try {
       const next = await fetchRandom(movie.genreId, movie.mediaType, recentRandomIds);
@@ -305,6 +346,7 @@ export default function MovieScreen({ route, navigation }: any) {
   const openRelated = async (item: any) => {
     setSkeletonVisible(true);
     setError('');
+    setShowTrailer(false);
 
     try {
       const details = await fetchFullDetails(item.id, item.media_type || movie.mediaType);
@@ -443,10 +485,42 @@ export default function MovieScreen({ route, navigation }: any) {
         ) : null}
 
         {movie.trailerKey && (
-          <TouchableOpacity style={styles.trailerBtn} onPress={openTrailerInYouTube}>
+          <TouchableOpacity style={styles.trailerBtn} onPress={() => setShowTrailer(true)}>
             <Ionicons name="play-circle" size={20} color="#fff" />
             <Text style={styles.trailerText}>Смотреть трейлер</Text>
           </TouchableOpacity>
+        )}
+
+        {showTrailer && movie.trailerKey && (
+          <View style={styles.videoContainer}>
+            <WebView
+              source={{
+                html: getYouTubeHtml(movie.trailerKey),
+                baseUrl: 'https://www.youtube.com',
+              }}
+              style={styles.video}
+              originWhitelist={['https://*']}
+              allowsFullscreenVideo
+              allowsInlineMediaPlayback
+              mediaPlaybackRequiresUserAction={false}
+              javaScriptEnabled
+              domStorageEnabled
+              thirdPartyCookiesEnabled
+              sharedCookiesEnabled
+              setSupportMultipleWindows={false}
+              userAgent="Mozilla/5.0 (Linux; Android 10; Mobile) AppleWebKit/537.36 Chrome/120.0 Mobile Safari/537.36"
+            />
+
+            <TouchableOpacity style={styles.closeVideo} onPress={() => setShowTrailer(false)}>
+              <Ionicons name="close-circle" size={20} color="#aaa" />
+              <Text style={styles.closeVideoText}>Закрыть трейлер</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity style={styles.youtubeFallback} onPress={openTrailerInYouTube}>
+              <Ionicons name="logo-youtube" size={18} color="#e50914" />
+              <Text style={styles.youtubeFallbackText}>Открыть на YouTube</Text>
+            </TouchableOpacity>
+          </View>
         )}
 
         {!movie.trailerKey && (
@@ -575,6 +649,12 @@ const styles = StyleSheet.create({
   retryText: { color: '#fff', fontSize: 14, fontWeight: '600' },
   trailerBtn: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: '#e50914', paddingHorizontal: 32, paddingVertical: 14, borderRadius: 30, marginBottom: 12 },
   trailerText: { color: '#fff', fontWeight: '700', fontSize: 16 },
+  videoContainer: { width: width - 40, marginBottom: 16 },
+  video: { width: '100%', height: (width - 40) * 0.56, borderRadius: 12, backgroundColor: '#000' },
+  closeVideo: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, marginTop: 8 },
+  closeVideoText: { color: '#aaa', fontSize: 13 },
+  youtubeFallback: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, marginTop: 10 },
+  youtubeFallbackText: { color: '#e50914', fontSize: 13, fontWeight: '600' },
   noTrailer: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: '#1e1e30', paddingHorizontal: 24, paddingVertical: 12, borderRadius: 30, marginBottom: 12 },
   noTrailerText: { color: '#555', fontSize: 14 },
   onlineBtn: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: '#1e1e40', borderWidth: 1, borderColor: '#8888ff', paddingHorizontal: 32, paddingVertical: 14, borderRadius: 30, marginBottom: 12 },
