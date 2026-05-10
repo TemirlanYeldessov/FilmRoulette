@@ -57,7 +57,6 @@ function getYouTubeHtml(videoId: string) {
     <html>
       <head>
         <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
-        <meta name="referrer" content="strict-origin-when-cross-origin">
         <style>
           html, body {
             margin: 0;
@@ -67,7 +66,15 @@ function getYouTubeHtml(videoId: string) {
             background: #000;
             overflow: hidden;
           }
+          .container {
+            position: relative;
+            width: 100%;
+            height: 100%;
+          }
           iframe {
+            position: absolute;
+            top: 0;
+            left: 0;
             width: 100%;
             height: 100%;
             border: 0;
@@ -75,13 +82,16 @@ function getYouTubeHtml(videoId: string) {
         </style>
       </head>
       <body>
-        <iframe
-          src="https://www.youtube.com/embed/${videoId}?playsinline=1&rel=0&modestbranding=1&enablejsapi=1&origin=https://www.youtube.com"
-          title="YouTube trailer"
-          allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
-          allowfullscreen
-          referrerpolicy="strict-origin-when-cross-origin">
-        </iframe>
+        <div class="container">
+          <iframe
+            id="player"
+            src="https://www.youtube.com/embed/${videoId}?enablejsapi=1&origin=https://www.youtube.com&rel=0&playsinline=1&modestbranding=1"
+            title="YouTube trailer"
+            allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+            allowfullscreen
+            referrerpolicy="no-referrer">
+          </iframe>
+        </div>
       </body>
     </html>
   `;
@@ -499,7 +509,7 @@ export default function MovieScreen({ route, navigation }: any) {
                 baseUrl: 'https://www.youtube.com',
               }}
               style={styles.video}
-              originWhitelist={['https://*']}
+              originWhitelist={['*']}
               allowsFullscreenVideo
               allowsInlineMediaPlayback
               mediaPlaybackRequiresUserAction={false}
@@ -508,7 +518,7 @@ export default function MovieScreen({ route, navigation }: any) {
               thirdPartyCookiesEnabled
               sharedCookiesEnabled
               setSupportMultipleWindows={false}
-              userAgent="Mozilla/5.0 (Linux; Android 10; Mobile) AppleWebKit/537.36 Chrome/120.0 Mobile Safari/537.36"
+              userAgent="Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
             />
 
             <TouchableOpacity style={styles.closeVideo} onPress={() => setShowTrailer(false)}>
