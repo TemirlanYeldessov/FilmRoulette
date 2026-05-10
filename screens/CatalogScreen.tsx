@@ -17,9 +17,9 @@ import {
 } from 'react-native';
 import { HorizontalCardSkeleton, MovieCardSkeleton } from '../components/Skeleton';
 import { useAppContext } from '../store/AppContext';
+import { TMDB_TOKEN as TOKEN } from '../constants/api';
 
 const { width } = Dimensions.get('window');
-const TOKEN = 'eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiI4ZDRjMGIyYjJmNWZiZDMxOWMzNTU4OTU2YmFhOTZiZiIsIm5iZiI6MTc3ODMxOTAzMS45NjMsInN1YiI6IjY5ZmVmZWI3ZmQ3NjliZmExZTFlMDk0MSIsInNjb3BlcyI6WyJhcGlfcmVhZCJdLCJ2ZXJzaW9uIjoxfQ.uJTLQyX-dOE5DG4Zjim4bYRIMx3OeEfHDk6Rz0z1WNA';
 const cardWidth = (width - 48) / 2;
 
 const MOVIE_GENRES = [
@@ -228,16 +228,16 @@ async function fetchRandom(selectedGenres: number[], mediaType: string, adultCon
   throw new Error('Новых вариантов по этим условиям не осталось. Попробуй изменить фильтры.');
 }
 
-async function searchItems(query: string, adultContent: boolean) {
+async function searchItems(query: string, adultContent: boolean, page = 1) {
   const res = await fetchWithTimeout(
-    `https://api.themoviedb.org/3/search/multi?query=${encodeURIComponent(query)}&language=ru-RU&include_adult=${adultContent}`,
+    `https://api.themoviedb.org/3/search/multi?query=${encodeURIComponent(query)}&language=ru-RU&include_adult=${adultContent}&page=${page}`,
     { headers: { Authorization: `Bearer ${TOKEN}` } }
   );
   const data = await res.json();
-
-  return (data.results || []).filter((m: any) => {
+  const results = (data.results || []).filter((m: any) => {
     return (m.media_type === 'movie' || m.media_type === 'tv') && m.poster_path;
   });
+  return { results, totalPages: data.total_pages ?? 1 };
 }
 
 async function discoverItems(filters: any, adultContent: boolean) {
@@ -407,8 +407,12 @@ export default function CatalogScreen({ navigation }: any) {
   const [searchResults, setSearchResults] = useState<any[]>([]);
   const [searching, setSearching] = useState(false);
   const [isSearchMode, setIsSearchMode] = useState(false);
+  const [searchPage, setSearchPage] = useState(1);
+  const [searchHasMore, setSearchHasMore] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [selectedGenres, setSelectedGenres] = useState<number[]>([0]);
   const searchRequestRef = useRef(0);
+  const lastQueryRef = useRef('');
   const genres = mediaType === 'tv' ? TV_GENRES : MOVIE_GENRES;
 
   const loadTrending = useCallback(async () => {
@@ -447,12 +451,18 @@ export default function CatalogScreen({ navigation }: any) {
 
     const timer = setTimeout(async () => {
       try {
-        const results = await searchItems(q, adultContent);
-        if (searchRequestRef.current === requestId) setSearchResults(results);
+        const { results, totalPages } = await searchItems(q, adultContent, 1);
+        if (searchRequestRef.current === requestId) {
+          lastQueryRef.current = q;
+          setSearchResults(results);
+          setSearchPage(1);
+          setSearchHasMore(totalPages > 1);
+        }
       } catch (e: any) {
         if (searchRequestRef.current === requestId) {
           setError(e.message || 'Не удалось выполнить поиск.');
           setSearchResults([]);
+          setSearchHasMore(false);
         }
       }
 
@@ -476,6 +486,23 @@ export default function CatalogScreen({ navigation }: any) {
     setSearching(false);
     setFilters(defaultFilters);
     setError('');
+    setSearchPage(1);
+    setSearchHasMore(false);
+  };
+
+  const loadMoreSearchResults = async () => {
+    if (loadingMore || !searchHasMore || !lastQueryRef.current) return;
+    setLoadingMore(true);
+    try {
+      const nextPage = searchPage + 1;
+      const { results, totalPages } = await searchItems(lastQueryRef.current, adultContent, nextPage);
+      setSearchResults(prev => [...prev, ...results]);
+      setSearchPage(nextPage);
+      setSearchHasMore(nextPage < totalPages);
+    } catch {
+      // silent
+    }
+    setLoadingMore(false);
   };
 
   const handleFilterSearch = async (f: any) => {
@@ -626,6 +653,15 @@ export default function CatalogScreen({ navigation }: any) {
                   {item.vote_average > 0 && <Text style={styles.cardRating}>★ {item.vote_average.toFixed(1)}</Text>}
                 </TouchableOpacity>
               )}
+              ListFooterComponent={
+                searchHasMore ? (
+                  <TouchableOpacity style={styles.loadMoreBtn} onPress={loadMoreSearchResults} disabled={loadingMore}>
+                    {loadingMore
+                      ? <ActivityIndicator size="small" color="#e50914" />
+                      : <Text style={styles.loadMoreText}>Показать ещё</Text>}
+                  </TouchableOpacity>
+                ) : null
+              }
             />
           )}
         </View>
@@ -797,6 +833,8 @@ const styles = StyleSheet.create({
   empty: { flex: 1, alignItems: 'center', paddingTop: 80, paddingHorizontal: 24 },
   emptyText: { color: '#aaa', fontSize: 16, textAlign: 'center', marginTop: 10 },
   emptyHint: { color: '#555', fontSize: 13, textAlign: 'center', marginTop: 6 },
+  loadMoreBtn: { alignItems: 'center', paddingVertical: 16, marginTop: 4 },
+  loadMoreText: { color: '#e50914', fontSize: 15, fontWeight: '700' },
 });
 
 const fStyles = StyleSheet.create({

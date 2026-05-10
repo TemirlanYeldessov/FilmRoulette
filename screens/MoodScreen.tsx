@@ -19,9 +19,7 @@ import {
   useSpeechRecognitionEvent,
 } from 'expo-speech-recognition';
 import { useAppContext } from '../store/AppContext';
-
-const TMDB_TOKEN = process.env.TMDB_TOKEN || '';
-const GROQ_KEY = process.env.GROQ_KEY || '';
+import { TMDB_TOKEN, GROQ_KEY } from '../constants/api';
 const { width } = Dimensions.get('window');
 const cardWidth = (width - 48) / 2;
 

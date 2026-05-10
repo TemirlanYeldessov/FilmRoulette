@@ -14,11 +14,10 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
-import WebView from 'react-native-webview';
+import YoutubePlayer from 'react-native-youtube-iframe';
 import { MovieDetailSkeleton } from '../components/Skeleton';
 import { useAppContext, UserMovieStatus } from '../store/AppContext';
-
-const TOKEN = 'eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiI4ZDRjMGIyYjJmNWZiZDMxOWMzNTU4OTU2YmFhOTZiZiIsIm5iZiI6MTc3ODMxOTAzMS45NjMsInN1YiI6IjY5ZmVmZWI3ZmQ3NjliZmExZTFlMDk0MSIsInNjb3BlcyI6WyJhcGlfcmVhZCJdLCJ2ZXJzaW9uIjoxfQ.uJTLQyX-dOE5DG4Zjim4bYRIMx3OeEfHDk6Rz0z1WNA';
+import { TMDB_TOKEN as TOKEN } from '../constants/api';
 const { width } = Dimensions.get('window');
 const relatedPosterWidth = 104;
 
@@ -51,81 +50,6 @@ const STATUS_OPTIONS: { key: UserMovieStatus; label: string; icon: any }[] = [
   { key: 'disliked', label: 'Не понравилось', icon: 'thumbs-down-outline' },
 ];
 
-// Injected before page content loads — spoofs Chrome APIs so YouTube doesn't detect WebView
-const CHROME_SPOOF_JS = `
-  (function() {
-    if (!window.chrome) {
-      window.chrome = {
-        runtime: {},
-        loadTimes: function() { return {}; },
-        csi: function() { return {}; },
-        app: {}
-      };
-    }
-    Object.defineProperty(navigator, 'vendor', { get: function() { return 'Google Inc.'; } });
-  })();
-  true;
-`;
-
-function getYouTubeHtml(videoId: string) {
-  return `<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
-  <style>
-    * { margin: 0; padding: 0; }
-    html, body { width: 100%; height: 100%; background: #000; overflow: hidden; }
-    #ytplayer { width: 100%; height: 100%; }
-  </style>
-</head>
-<body>
-  <div id="ytplayer"></div>
-  <script>
-    var tag = document.createElement('script');
-    tag.src = 'https://www.youtube.com/iframe_api';
-    document.head.appendChild(tag);
-
-    var player;
-
-    function onYouTubeIframeAPIReady() {
-      player = new YT.Player('ytplayer', {
-        videoId: '${videoId}',
-        playerVars: {
-          autoplay: 1,
-          mute: 1,
-          playsinline: 1,
-          rel: 0,
-          modestbranding: 1,
-          controls: 1,
-          enablejsapi: 1,
-          origin: 'https://www.youtube.com',
-        },
-        events: {
-          onReady: function(e) {
-            e.target.playVideo();
-            setTimeout(function() {
-              try { e.target.unMute(); e.target.setVolume(100); } catch(ex) {}
-            }, 800);
-          },
-          onError: function(e) {
-            if (e.data === 153 || e.data === 150 || e.data === 151 || e.data === 2) {
-              var wrap = document.getElementById('ytplayer');
-              wrap.innerHTML = '';
-              var fr = document.createElement('iframe');
-              fr.src = 'https://www.youtube-nocookie.com/embed/${videoId}?autoplay=1&mute=1&playsinline=1&rel=0&controls=1&enablejsapi=1';
-              fr.style.cssText = 'width:100%;height:100%;border:0;';
-              fr.allow = 'autoplay; fullscreen; encrypted-media';
-              wrap.appendChild(fr);
-            }
-          }
-        }
-      });
-    }
-  </script>
-</body>
-</html>`;
-}
 
 async function fetchWithTimeout(url: string, options: any = {}, timeout = 10000) {
   const controller = new AbortController();
@@ -509,7 +433,17 @@ export default function MovieScreen({ route, navigation }: any) {
         {movie.cast?.length > 0 && (
           <View style={styles.infoBlock}>
             <Text style={styles.blockTitle}>Актеры</Text>
-            <Text style={styles.infoText}>{movie.cast.map((p: any) => p.name).join(', ')}</Text>
+            <View style={styles.castRow}>
+              {movie.cast.map((p: any) => (
+                <TouchableOpacity
+                  key={p.id}
+                  style={styles.castChip}
+                  onPress={() => navigation.navigate('Actor', { personId: p.id, name: p.name })}
+                >
+                  <Text style={styles.castChipText}>{p.name}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
           </View>
         )}
 
@@ -533,24 +467,13 @@ export default function MovieScreen({ route, navigation }: any) {
 
         {showTrailer && movie.trailerKey && (
           <View style={styles.videoContainer}>
-            <WebView
-              source={{
-                html: getYouTubeHtml(movie.trailerKey),
-                baseUrl: 'https://www.youtube.com',
+            <YoutubePlayer
+              videoId={movie.trailerKey}
+              height={Math.round((width - 40) * 0.56)}
+              play={showTrailer}
+              onChangeState={(state: string) => {
+                if (state === 'ended') setShowTrailer(false);
               }}
-              style={styles.video}
-              originWhitelist={['*']}
-              allowsFullscreenVideo
-              allowsInlineMediaPlayback
-              mediaPlaybackRequiresUserAction={false}
-              javaScriptEnabled={true}
-              domStorageEnabled={true}
-              mixedContentMode="always"
-              thirdPartyCookiesEnabled
-              sharedCookiesEnabled
-              setSupportMultipleWindows={false}
-              injectedJavaScriptBeforeContentLoaded={CHROME_SPOOF_JS}
-              userAgent="Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.6099.230 Mobile Safari/537.36"
             />
 
             <TouchableOpacity style={styles.closeVideo} onPress={() => setShowTrailer(false)}>
@@ -691,8 +614,7 @@ const styles = StyleSheet.create({
   retryText: { color: '#fff', fontSize: 14, fontWeight: '600' },
   trailerBtn: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: '#e50914', paddingHorizontal: 32, paddingVertical: 14, borderRadius: 30, marginBottom: 12 },
   trailerText: { color: '#fff', fontWeight: '700', fontSize: 16 },
-  videoContainer: { width: width - 40, marginBottom: 16 },
-  video: { width: '100%', height: (width - 40) * 0.56, borderRadius: 12, backgroundColor: '#000' },
+  videoContainer: { width: width - 40, marginBottom: 16, borderRadius: 12, overflow: 'hidden' },
   closeVideo: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, marginTop: 8 },
   closeVideoText: { color: '#aaa', fontSize: 13 },
   youtubeFallback: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, marginTop: 10 },
@@ -725,4 +647,7 @@ const styles = StyleSheet.create({
   sourceHint: { color: '#666', fontSize: 12, marginTop: 2 },
   cancelBtn: { alignItems: 'center', marginTop: 8, paddingVertical: 14 },
   cancelText: { color: '#aaa', fontSize: 16 },
+  castRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 4 },
+  castChip: { backgroundColor: '#0f0f1a', borderWidth: 1, borderColor: '#2a2a44', borderRadius: 16, paddingHorizontal: 12, paddingVertical: 6 },
+  castChipText: { color: '#8888ff', fontSize: 13 },
 });

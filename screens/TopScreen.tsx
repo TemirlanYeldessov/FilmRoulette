@@ -17,8 +17,7 @@ import { Image } from 'expo-image';
 import { Ionicons } from '@expo/vector-icons';
 import { useAppContext } from '../store/AppContext';
 import { MovieCardSkeleton } from '../components/Skeleton';
-
-const TOKEN = 'eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiI4ZDRjMGIyYjJmNWZiZDMxOWMzNTU4OTU2YmFhOTZiZiIsIm5iZiI6MTc3ODMxOTAzMS45NjMsInN1YiI6IjY5ZmVmZWI3ZmQ3NjliZmExZTFlMDk0MSIsInNjb3BlcyI6WyJhcGlfcmVhZCJdLCJ2ZXJzaW9uIjoxfQ.uJTLQyX-dOE5DG4Zjim4bYRIMx3OeEfHDk6Rz0z1WNA';
+import { TMDB_TOKEN as TOKEN } from '../constants/api';
 const { width } = Dimensions.get('window');
 const cardWidth = (width - 48) / 2;
 
