@@ -22,8 +22,7 @@
       },
       "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false,
-      "package": "com.proxyte1996.MediaRoulette",
-      "usesCleartextTraffic": true
+      "package": "com.proxyte1996.MediaRoulette"
     },
     "web": {
       "favicon": "./assets/favicon.png"
@@ -37,7 +36,15 @@
           "speechRecognitionPermission": "Разрешите распознавание речи для голосового поиска"
         }
       ],
-      "expo-font"
+      "expo-font",
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "usesCleartextTraffic": true
+          }
+        }
+      ]
     ],
     "extra": {
       "eas": {
