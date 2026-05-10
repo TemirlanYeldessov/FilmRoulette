@@ -513,8 +513,11 @@ export default function MovieScreen({ route, navigation }: any) {
               allowsFullscreenVideo
               allowsInlineMediaPlayback
               mediaPlaybackRequiresUserAction={false}
-              javaScriptEnabled
-              domStorageEnabled
+              javaScriptEnabled={true}
+              domStorageEnabled={true}
+              onMessage={(event) => {
+              }}
+              mixedContentMode="always"
               thirdPartyCookiesEnabled
               sharedCookiesEnabled
               setSupportMultipleWindows={false}
