@@ -1,7 +1,6 @@
 import { LinearGradient } from 'expo-linear-gradient';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
-  ActivityIndicator,
   Dimensions,
   FlatList,
   Modal,
@@ -17,7 +16,9 @@ import { Image } from 'expo-image';
 import { Ionicons } from '@expo/vector-icons';
 import { useAppContext } from '../store/AppContext';
 import { MovieCardSkeleton } from '../components/Skeleton';
+import PaginationBar from '../components/PaginationBar';
 import { TMDB_TOKEN as TOKEN } from '../constants/api';
+
 const { width } = Dimensions.get('window');
 const cardWidth = (width - 48) / 2;
 
@@ -62,6 +63,9 @@ const SORT_OPTIONS = [
   { key: 'release_date.asc', name: 'Сначала старые' },
 ];
 
+const SKELETON_KEYS = [1, 2, 3, 4, 5, 6];
+const ITEMS_PER_PAGE = 20;
+
 async function fetchWithTimeout(url: string, options: any = {}, timeout = 10000) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeout);
@@ -77,27 +81,35 @@ async function fetchWithTimeout(url: string, options: any = {}, timeout = 10000)
 }
 
 async function fetchItems(mediaType: string, category: string, page: number) {
-  let url = category === 'trending'
+  const url = category === 'trending'
     ? `https://api.themoviedb.org/3/trending/${mediaType}/week?language=ru-RU&page=${page}`
     : `https://api.themoviedb.org/3/${mediaType}/${category}?language=ru-RU&page=${page}`;
   const res = await fetchWithTimeout(url, { headers: { Authorization: `Bearer ${TOKEN}` } });
   const data = await res.json();
-  return (data.results || []).filter((m: any) => m.poster_path);
+  return {
+    results: (data.results || []).filter((m: any) => m.poster_path),
+    totalPages: Math.min(data.total_pages || 1, 500),
+    totalResults: data.total_results || 0,
+  };
 }
 
-async function searchItems(query: string, mediaType: string, adultContent: boolean) {
+async function searchItems(query: string, mediaType: string, adultContent: boolean, page = 1) {
   const res = await fetchWithTimeout(
-    `https://api.themoviedb.org/3/search/${mediaType}?query=${encodeURIComponent(query)}&language=ru-RU&include_adult=${adultContent}`,
+    `https://api.themoviedb.org/3/search/${mediaType}?query=${encodeURIComponent(query)}&language=ru-RU&include_adult=${adultContent}&page=${page}`,
     { headers: { Authorization: `Bearer ${TOKEN}` } }
   );
   const data = await res.json();
-  return (data.results || []).filter((m: any) => m.poster_path).map((m: any) => ({ ...m, media_type: mediaType }));
+  return {
+    results: (data.results || []).filter((m: any) => m.poster_path).map((m: any) => ({ ...m, media_type: mediaType })),
+    totalPages: Math.min(data.total_pages || 1, 500),
+    totalResults: data.total_results || 0,
+  };
 }
 
-async function discoverWithFilters(mediaType: string, filters: any, adultContent: boolean) {
+async function discoverWithFilters(mediaType: string, filters: any, adultContent: boolean, page = 1) {
   const params: any = {
     language: 'ru-RU', sort_by: filters.sortBy || 'popularity.desc',
-    page: '1', include_adult: String(adultContent),
+    page: String(page), include_adult: String(adultContent),
   };
   if (filters.minRating > 0) params['vote_average.gte'] = String(filters.minRating);
   if (filters.language) params.with_original_language = filters.language;
@@ -107,37 +119,28 @@ async function discoverWithFilters(mediaType: string, filters: any, adultContent
   const url = `https://api.themoviedb.org/3/discover/${mediaType}?${new URLSearchParams(params)}`;
   const res = await fetchWithTimeout(url, { headers: { Authorization: `Bearer ${TOKEN}` } });
   const data = await res.json();
-  return (data.results || []).filter((m: any) => m.poster_path).map((m: any) => ({ ...m, media_type: mediaType }));
+  return {
+    results: (data.results || []).filter((m: any) => m.poster_path).map((m: any) => ({ ...m, media_type: mediaType })),
+    totalPages: Math.min(data.total_pages || 1, 500),
+    totalResults: data.total_results || 0,
+  };
 }
 
-async function fetchDetails(id: number, type: string) {
-  const [ruRes, enRes] = await Promise.all([
-    fetchWithTimeout(`https://api.themoviedb.org/3/${type}/${id}?language=ru-RU`, { headers: { Authorization: `Bearer ${TOKEN}` } }),
-    fetchWithTimeout(`https://api.themoviedb.org/3/${type}/${id}?language=en-US`, { headers: { Authorization: `Bearer ${TOKEN}` } }),
-  ]);
-  const ruData = await ruRes.json();
-  const enData = await enRes.json();
-  const resRu = await fetchWithTimeout(`https://api.themoviedb.org/3/${type}/${id}/videos?language=ru-RU`, { headers: { Authorization: `Bearer ${TOKEN}` } });
-  const dataRu = await resRu.json();
-  let trailer = dataRu.results?.find((v: any) => v.type === 'Trailer' && v.site === 'YouTube');
-  if (!trailer) {
-    const resEn = await fetchWithTimeout(`https://api.themoviedb.org/3/${type}/${id}/videos?language=en-US`, { headers: { Authorization: `Bearer ${TOKEN}` } });
-    const dataEn = await resEn.json();
-    trailer = dataEn.results?.find((v: any) => v.type === 'Trailer' && v.site === 'YouTube');
-  }
+function itemToMovie(item: any, fallbackType: string) {
+  const type = item.media_type || fallbackType;
   return {
-    id,
-    titleRu: ruData.title || ruData.name,
-    titleEn: enData.title || enData.name,
-    overview: ruData.overview || enData.overview,
-    poster: `https://image.tmdb.org/t/p/w500${ruData.poster_path}`,
-    trailerKey: trailer?.key || null,
-    genreId: null,
+    id: item.id,
+    titleRu: item.title || item.name || '',
+    titleEn: item.title || item.name || '',
+    overview: item.overview || '',
+    poster: item.poster_path ? `https://image.tmdb.org/t/p/w500${item.poster_path}` : null,
+    trailerKey: null,
     mediaType: type,
-    rating: ruData.vote_average ? ruData.vote_average.toFixed(1) : null,
-    year: (ruData.release_date || ruData.first_air_date || '').slice(0, 4),
-    country: ruData.production_countries?.[0]?.name || null,
-    genres: ruData.genres?.map((g: any) => g.name).join(', ') || null,
+    rating: item.vote_average > 0 ? item.vote_average.toFixed(1) : null,
+    year: (item.release_date || item.first_air_date || '').slice(0, 4),
+    country: null,
+    genres: null,
+    genreId: null,
   };
 }
 
@@ -149,92 +152,126 @@ export default function TopScreen({ navigation }: any) {
   const [category, setCategory] = useState('top_rated');
   const [items, setItems] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
-  const [loadingMore, setLoadingMore] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
-  const [page, setPage] = useState(1);
-  const [cardLoading, setCardLoading] = useState(false);
+  const [currentPage, setCurrentPage] = useState(1);
+  const [totalPages, setTotalPages] = useState(1);
+  const [totalResults, setTotalResults] = useState(0);
+
   const [searchQuery, setSearchQuery] = useState('');
   const [isSearchMode, setIsSearchMode] = useState(false);
-  const [searchResults, setSearchResults] = useState<any[]>([]);
   const [searching, setSearching] = useState(false);
   const [showFilters, setShowFilters] = useState(false);
   const [filters, setFilters] = useState(defaultFilters);
   const [localFilters, setLocalFilters] = useState(defaultFilters);
 
-  const load = useCallback(async (mt: string, cat: string, p: number, reset = false) => {
-    if (p === 1) setLoading(true);
-    else setLoadingMore(true);
+  const lastQueryRef = useRef('');
+  const activeFiltersRef = useRef(defaultFilters);
+  const listRef = useRef<FlatList>(null);
+
+  const load = useCallback(async (mt: string, cat: string, page: number) => {
+    setLoading(true);
     try {
-      const results = await fetchItems(mt, cat, p);
-      setItems(prev => reset || p === 1 ? results : [...prev, ...results]);
+      const { results, totalPages: tp, totalResults: tr } = await fetchItems(mt, cat, page);
+      setItems(results);
+      setTotalPages(tp);
+      setTotalResults(tr);
+      setCurrentPage(page);
     } catch (e) { console.error(e); }
     setLoading(false);
-    setLoadingMore(false);
   }, []);
 
   useEffect(() => {
-    setPage(1);
+    setCurrentPage(1);
     setItems([]);
-    setLoading(true);
-    load(mediaType, category, 1, true);
+    setIsSearchMode(false);
+    setSearchQuery('');
+    lastQueryRef.current = '';
+    load(mediaType, category, 1);
   }, [mediaType, category]);
 
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
-    setPage(1);
-    await load(mediaType, category, 1, true);
+    await load(mediaType, category, 1);
     setRefreshing(false);
-  }, [mediaType, category]);
+  }, [mediaType, category, load]);
 
   const switchMedia = (mt: string) => {
     setMediaType(mt);
     setCategory('top_rated');
     setSearchQuery('');
     setIsSearchMode(false);
+    lastQueryRef.current = '';
   };
 
-  const loadMore = () => {
-    const next = page + 1;
-    setPage(next);
-    load(mediaType, category, next);
+  const handlePageChange = async (page: number) => {
+    if (loading || searching) return;
+    listRef.current?.scrollToOffset({ offset: 0, animated: false });
+    if (isSearchMode) {
+      setSearching(true);
+      setCurrentPage(page);
+      try {
+        if (lastQueryRef.current) {
+          const { results, totalPages: tp, totalResults: tr } = await searchItems(lastQueryRef.current, mediaType, adultContent, page);
+          setItems(results);
+          setTotalPages(tp);
+          setTotalResults(tr);
+        } else {
+          const { results, totalPages: tp, totalResults: tr } = await discoverWithFilters(mediaType, activeFiltersRef.current, adultContent, page);
+          setItems(results);
+          setTotalPages(tp);
+          setTotalResults(tr);
+        }
+      } catch { /* silent */ }
+      setSearching(false);
+    } else {
+      await load(mediaType, category, page);
+    }
   };
 
   const handleSearch = async (q: string) => {
     setSearchQuery(q);
-    if (!q.trim()) { setIsSearchMode(false); setSearchResults([]); return; }
+    if (!q.trim()) {
+      setIsSearchMode(false);
+      lastQueryRef.current = '';
+      load(mediaType, category, 1);
+      return;
+    }
+    lastQueryRef.current = q.trim();
     setIsSearchMode(true);
     setSearching(true);
     try {
-      const results = await searchItems(q, mediaType, adultContent);
-      setSearchResults(results);
+      const { results, totalPages: tp, totalResults: tr } = await searchItems(q, mediaType, adultContent, 1);
+      setItems(results);
+      setTotalPages(tp);
+      setTotalResults(tr);
+      setCurrentPage(1);
     } catch (e) { console.error(e); }
     setSearching(false);
   };
 
   const applyFilters = async (f: any) => {
     setFilters(f);
+    activeFiltersRef.current = f;
+    lastQueryRef.current = '';
     setShowFilters(false);
     setIsSearchMode(true);
     setSearching(true);
+    setCurrentPage(1);
     try {
-      const results = await discoverWithFilters(mediaType, f, adultContent);
-      setSearchResults(results);
+      const { results, totalPages: tp, totalResults: tr } = await discoverWithFilters(mediaType, f, adultContent, 1);
+      setItems(results);
+      setTotalPages(tp);
+      setTotalResults(tr);
     } catch (e) { console.error(e); }
     setSearching(false);
   };
 
-  const openCard = async (item: any) => {
-    setCardLoading(true);
-    try {
-      const type = item.media_type || mediaType;
-      const details = await fetchDetails(item.id, type);
-      navigation.navigate('Card', { movie: details });
-    } catch (e) { console.error(e); }
-    setCardLoading(false);
+  const openCard = (item: any) => {
+    navigation.navigate('Card', { movie: itemToMovie(item, mediaType) });
   };
 
   const categories = CATEGORY_TABS[mediaType as keyof typeof CATEGORY_TABS];
-  const displayItems = isSearchMode ? searchResults : items;
+  const isLoading = loading || searching;
 
   return (
     <LinearGradient colors={['#0f0f1a', '#1a1a2e']} style={styles.container}>
@@ -257,14 +294,14 @@ export default function TopScreen({ navigation }: any) {
             <Ionicons name="search" size={16} color="#555" style={styles.searchIcon} />
             <TextInput
               style={styles.searchInput}
-              placeholder={`Поиск в топе...`}
+              placeholder="Поиск в топе..."
               placeholderTextColor="#555"
               value={searchQuery}
               onChangeText={handleSearch}
               returnKeyType="search"
             />
             {searchQuery.length > 0 && (
-              <TouchableOpacity onPress={() => { setSearchQuery(''); setIsSearchMode(false); }}>
+              <TouchableOpacity onPress={() => { setSearchQuery(''); setIsSearchMode(false); lastQueryRef.current = ''; load(mediaType, category, 1); }}>
                 <Ionicons name="close-circle" size={16} color="#555" />
               </TouchableOpacity>
             )}
@@ -289,53 +326,62 @@ export default function TopScreen({ navigation }: any) {
         )}
       </View>
 
-      {loading || cardLoading || searching ? (
+      {isLoading ? (
         <FlatList
-          data={[1,2,3,4,5,6]}
+          data={SKELETON_KEYS}
           keyExtractor={i => String(i)}
           numColumns={2}
           contentContainerStyle={styles.grid}
           columnWrapperStyle={styles.row}
           renderItem={() => <MovieCardSkeleton cardWidth={cardWidth} />}
         />
-      ) : displayItems.length === 0 ? (
+      ) : items.length === 0 ? (
         <View style={styles.empty}>
           <Text style={styles.emptyText}>Ничего не найдено</Text>
         </View>
       ) : (
         <FlatList
-          data={displayItems}
+          ref={listRef}
+          data={items}
           keyExtractor={(item, index) => `${item.id}-${index}`}
           numColumns={2}
           contentContainerStyle={styles.grid}
           columnWrapperStyle={styles.row}
-          refreshControl={!isSearchMode ? <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#e50914" /> : undefined}
-          onEndReached={!isSearchMode ? loadMore : undefined}
-          onEndReachedThreshold={0.5}
-          ListFooterComponent={loadingMore ? (
-            <View style={styles.row}>
-              <MovieCardSkeleton cardWidth={cardWidth} />
-              <MovieCardSkeleton cardWidth={cardWidth} />
-            </View>
-          ) : null}
-          renderItem={({ item, index }) => (
-            <TouchableOpacity style={styles.card} onPress={() => openCard(item)} disabled={cardLoading}>
-              {!isSearchMode && (
-                <View style={styles.rankBadge}>
-                  <Text style={styles.rankText}>#{index + 1}</Text>
-                </View>
-              )}
-              <Image
-                source={{ uri: `https://image.tmdb.org/t/p/w300${item.poster_path}` }}
-                style={styles.poster}
-                contentFit="cover"
-                transition={200}
-                cachePolicy="memory-disk"
-              />
-              <Text style={styles.cardTitle} numberOfLines={2}>{item.title || item.name}</Text>
-              {item.vote_average > 0 && <Text style={styles.cardRating}>⭐ {item.vote_average.toFixed(1)}</Text>}
-            </TouchableOpacity>
-          )}
+          refreshControl={
+            !isSearchMode
+              ? <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#e50914" />
+              : undefined
+          }
+          renderItem={({ item, index }) => {
+            const rank = (currentPage - 1) * ITEMS_PER_PAGE + index + 1;
+            return (
+              <TouchableOpacity style={styles.card} onPress={() => openCard(item)}>
+                {!isSearchMode && (
+                  <View style={styles.rankBadge}>
+                    <Text style={styles.rankText}>#{rank}</Text>
+                  </View>
+                )}
+                <Image
+                  source={{ uri: `https://image.tmdb.org/t/p/w300${item.poster_path}` }}
+                  style={styles.poster}
+                  contentFit="cover"
+                  transition={200}
+                  cachePolicy="memory-disk"
+                />
+                <Text style={styles.cardTitle} numberOfLines={2}>{item.title || item.name}</Text>
+                {item.vote_average > 0 && <Text style={styles.cardRating}>⭐ {item.vote_average.toFixed(1)}</Text>}
+              </TouchableOpacity>
+            );
+          }}
+          ListFooterComponent={
+            <PaginationBar
+              currentPage={currentPage}
+              totalPages={totalPages}
+              totalResults={totalResults}
+              onPageChange={handlePageChange}
+              loading={isLoading}
+            />
+          }
         />
       )}
 

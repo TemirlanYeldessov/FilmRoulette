@@ -5,6 +5,7 @@ import { useEffect, useState } from 'react';
 import {
   ActivityIndicator,
   Dimensions,
+  FlatList,
   Linking,
   Modal,
   ScrollView,
@@ -18,6 +19,7 @@ import YoutubePlayer from 'react-native-youtube-iframe';
 import { MovieDetailSkeleton } from '../components/Skeleton';
 import { useAppContext, UserMovieStatus } from '../store/AppContext';
 import { TMDB_TOKEN as TOKEN } from '../constants/api';
+
 const { width } = Dimensions.get('window');
 const relatedPosterWidth = 104;
 
@@ -50,27 +52,17 @@ const STATUS_OPTIONS: { key: UserMovieStatus; label: string; icon: any }[] = [
   { key: 'disliked', label: 'Не понравилось', icon: 'thumbs-down-outline' },
 ];
 
-
 async function fetchWithTimeout(url: string, options: any = {}, timeout = 10000) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeout);
-
   try {
     const res = await fetch(url, { ...options, signal: controller.signal });
     clearTimeout(timer);
-
-    if (!res.ok) {
-      throw new Error('TMDB временно не отвечает. Попробуй еще раз.');
-    }
-
+    if (!res.ok) throw new Error('TMDB временно не отвечает. Попробуй еще раз.');
     return res;
   } catch (e: any) {
     clearTimeout(timer);
-
-    if (e.name === 'AbortError') {
-      throw new Error('Превышено время ожидания. Проверь интернет.');
-    }
-
+    if (e.name === 'AbortError') throw new Error('Превышено время ожидания. Проверь интернет.');
     throw e;
   }
 }
@@ -83,15 +75,12 @@ async function getTrailer(id: number, type: string) {
     );
     const dataRu = await resRu.json();
     const trailerRu = dataRu.results?.find((v: any) => v.type === 'Trailer' && v.site === 'YouTube');
-
     if (trailerRu) return trailerRu.key;
-
     const resEn = await fetchWithTimeout(
       `https://api.themoviedb.org/3/${type}/${id}/videos?language=en-US`,
       { headers: { Authorization: `Bearer ${TOKEN}` } }
     );
     const dataEn = await resEn.json();
-
     return dataEn.results?.find((v: any) => v.type === 'Trailer' && v.site === 'YouTube')?.key || null;
   } catch {
     return null;
@@ -105,7 +94,6 @@ function getCertification(data: any, type: string) {
     const release = [...(ru?.release_dates || []), ...(us?.release_dates || [])].find((r: any) => r.certification);
     return release?.certification || null;
   }
-
   const ru = data.content_ratings?.results?.find((r: any) => r.iso_3166_1 === 'RU');
   const us = data.content_ratings?.results?.find((r: any) => r.iso_3166_1 === 'US');
   return ru?.rating || us?.rating || null;
@@ -118,11 +106,20 @@ function getProviders(data: any) {
   return Array.from(unique.values()).slice(0, 8);
 }
 
+function dedup(items: any[]): any[] {
+  const seen = new Set<string>();
+  return items.filter(item => {
+    const key = `${item.media_type || ''}-${item.id}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 function normalizeRelated(items: any[], type: string) {
   return (items || [])
     .filter((m: any) => m.poster_path)
-    .slice(0, 12)
-    .map((m: any) => ({ ...m, media_type: type }));
+    .map((m: any) => ({ ...m, media_type: m.media_type || type }));
 }
 
 async function fetchFullDetails(id: number, type: string) {
@@ -140,10 +137,11 @@ async function fetchFullDetails(id: number, type: string) {
 
   const ruData = await ruRes.json();
   const enData = await enRes.json();
-  const recommendations = normalizeRelated(
-    ruData.recommendations?.results?.length ? ruData.recommendations.results : ruData.similar?.results,
-    type
-  );
+  const recSource = ruData.recommendations?.results?.length
+    ? ruData.recommendations.results
+    : ruData.similar?.results;
+  const recommendations = normalizeRelated(recSource, type);
+  const recommendationsTotalPages = ruData.recommendations?.total_pages || 1;
 
   return {
     id,
@@ -167,6 +165,7 @@ async function fetchFullDetails(id: number, type: string) {
         : ruData.created_by || [],
     providers: getProviders(ruData),
     recommendations,
+    recommendationsTotalPages,
     imdbId: ruData.external_ids?.imdb_id || null,
     genreId: null,
   };
@@ -174,34 +173,25 @@ async function fetchFullDetails(id: number, type: string) {
 
 async function fetchRandom(genreId: number, mediaType: string, recentRandomIds: string[]) {
   const type = mediaType === 'tv' ? 'tv' : 'movie';
-  const params: any = {
-    sort_by: 'popularity.desc',
-    language: 'ru-RU',
-  };
-
-  if (genreId) {
-    params.with_genres = String(genreId);
-  }
+  const params: any = { sort_by: 'popularity.desc', language: 'ru-RU' };
+  if (genreId) params.with_genres = String(genreId);
 
   for (let attempt = 0; attempt < 5; attempt += 1) {
     params.page = String(Math.floor(Math.random() * 20) + 1);
-
     const res = await fetchWithTimeout(
       `https://api.themoviedb.org/3/discover/${type}?${new URLSearchParams(params)}`,
       { headers: { Authorization: `Bearer ${TOKEN}` } }
     );
     const data = await res.json();
-    const items = (data.results || []).filter((m: any) => {
-      return m.poster_path && !recentRandomIds.includes(`${type}-${m.id}`);
-    });
-
+    const items = (data.results || []).filter(
+      (m: any) => m.poster_path && !recentRandomIds.includes(`${type}-${m.id}`)
+    );
     if (items.length > 0) {
       const item = items[Math.floor(Math.random() * items.length)];
       const details = await fetchFullDetails(item.id, type);
       return { ...details, genreId, mediaType };
     }
   }
-
   throw new Error('Все свежие варианты уже попадались. Попробуй другой жанр или фильтр.');
 }
 
@@ -213,15 +203,17 @@ export default function MovieScreen({ route, navigation }: any) {
   const [error, setError] = useState('');
   const [showOnline, setShowOnline] = useState(false);
   const [showTrailer, setShowTrailer] = useState(false);
+
+  // Related / recommendations infinite scroll
+  const [relatedItems, setRelatedItems] = useState<any[]>([]);
+  const [relatedPage, setRelatedPage] = useState(1);
+  const [relatedHasMore, setRelatedHasMore] = useState(false);
+  const [relatedLoadingMore, setRelatedLoadingMore] = useState(false);
+
   const {
-    addToWatchlist,
-    removeFromWatchlist,
-    isInWatchlist,
-    getUserStatus,
-    setUserStatus,
-    clearUserStatus,
-    recentRandomIds,
-    addRecentRandom,
+    addToWatchlist, removeFromWatchlist, isInWatchlist,
+    getUserStatus, setUserStatus, clearUserStatus,
+    recentRandomIds, addRecentRandom,
   } = useAppContext();
 
   const inWatchlist = movie.id ? isInWatchlist(movie.id, movie.mediaType) : false;
@@ -229,12 +221,19 @@ export default function MovieScreen({ route, navigation }: any) {
   const currentStatus = movie.id ? getUserStatus(movie.id, movie.mediaType) : null;
   const title = movie.titleRu || movie.titleEn;
 
+  // Initialize related items when movie changes
+  useEffect(() => {
+    const recs = movie.recommendations || [];
+    setRelatedItems(recs);
+    setRelatedPage(1);
+    setRelatedHasMore((movie.recommendationsTotalPages || 1) > 1);
+  }, [movie.id]);
+
+  // Hydrate missing details
   useEffect(() => {
     let mounted = true;
-
     async function hydrate() {
       if (!movie.id || movie.cast || movie.providers || movie.recommendations) return;
-
       setHydrating(true);
       try {
         const details = await fetchFullDetails(movie.id, movie.mediaType);
@@ -244,20 +243,31 @@ export default function MovieScreen({ route, navigation }: any) {
       }
       if (mounted) setHydrating(false);
     }
-
     hydrate();
-
-    return () => {
-      mounted = false;
-    };
+    return () => { mounted = false; };
   }, [movie.id, movie.mediaType]);
 
+  const loadMoreRelated = async () => {
+    if (relatedLoadingMore || !relatedHasMore || !movie.id) return;
+    setRelatedLoadingMore(true);
+    try {
+      const nextPage = relatedPage + 1;
+      const res = await fetchWithTimeout(
+        `https://api.themoviedb.org/3/${movie.mediaType}/${movie.id}/recommendations?language=ru-RU&page=${nextPage}`,
+        { headers: { Authorization: `Bearer ${TOKEN}` } }
+      );
+      const data = await res.json();
+      const more = normalizeRelated(data.results, movie.mediaType);
+      setRelatedItems(prev => dedup([...prev, ...more]));
+      setRelatedPage(nextPage);
+      setRelatedHasMore(nextPage < (data.total_pages || 1));
+    } catch { /* silent */ }
+    setRelatedLoadingMore(false);
+  };
+
   const toggleWatchlist = () => {
-    if (inWatchlist) {
-      removeFromWatchlist(movie.id, movie.mediaType);
-    } else {
-      addToWatchlist(movie);
-    }
+    if (inWatchlist) removeFromWatchlist(movie.id, movie.mediaType);
+    else addToWatchlist(movie);
   };
 
   const handleShare = async () => {
@@ -273,28 +283,20 @@ export default function MovieScreen({ route, navigation }: any) {
   const openSource = async (source: typeof ONLINE_SOURCES[0]) => {
     setShowOnline(false);
     const sourceTitle = movie.titleEn || movie.titleRu;
-
     if (source.deeplink) {
       const deeplink = source.deeplink(sourceTitle);
       const canOpen = await Linking.canOpenURL(deeplink);
-
-      if (canOpen) {
-        Linking.openURL(deeplink);
-        return;
-      }
+      if (canOpen) { Linking.openURL(deeplink); return; }
     }
-
     Linking.openURL(source.getUrl(sourceTitle));
   };
 
   const loadNext = async () => {
     if (!canLoadRandom) return;
-
     setLoadingNext(true);
     setSkeletonVisible(true);
     setError('');
     setShowTrailer(false);
-
     try {
       const next = await fetchRandom(movie.genreId, movie.mediaType, recentRandomIds);
       addRecentRandom(next.id, next.mediaType);
@@ -302,24 +304,27 @@ export default function MovieScreen({ route, navigation }: any) {
     } catch (e: any) {
       setError(e.message || 'Ошибка загрузки.');
     }
-
     setLoadingNext(false);
     setSkeletonVisible(false);
   };
 
-  const openRelated = async (item: any) => {
-    setSkeletonVisible(true);
-    setError('');
-    setShowTrailer(false);
-
-    try {
-      const details = await fetchFullDetails(item.id, item.media_type || movie.mediaType);
-      setMovie(details);
-    } catch (e: any) {
-      setError(e.message || 'Не удалось открыть похожий тайтл.');
-    }
-
-    setSkeletonVisible(false);
+  const openRelated = (item: any) => {
+    navigation.navigate('Card', {
+      movie: {
+        id: item.id,
+        titleRu: item.title || item.name || '',
+        titleEn: item.title || item.name || '',
+        overview: item.overview || '',
+        poster: item.poster_path ? `https://image.tmdb.org/t/p/w500${item.poster_path}` : null,
+        trailerKey: null,
+        mediaType: item.media_type || movie.mediaType,
+        rating: item.vote_average > 0 ? item.vote_average.toFixed(1) : null,
+        year: (item.release_date || item.first_air_date || '').slice(0, 4),
+        country: null,
+        genres: null,
+        genreId: null,
+      },
+    });
   };
 
   if (skeletonVisible) {
@@ -344,21 +349,15 @@ export default function MovieScreen({ route, navigation }: any) {
             <Ionicons name="chevron-back" size={20} color="#aaa" />
             <Text style={styles.backText}>Назад</Text>
           </TouchableOpacity>
-
           <View style={styles.topActions}>
             {movie.id && (
               <TouchableOpacity style={styles.iconBtn} onPress={handleShare}>
                 <Ionicons name="share-outline" size={20} color="#aaa" />
               </TouchableOpacity>
             )}
-
             {movie.id && (
               <TouchableOpacity style={styles.iconBtn} onPress={toggleWatchlist}>
-                <Ionicons
-                  name={inWatchlist ? 'heart' : 'heart-outline'}
-                  size={20}
-                  color={inWatchlist ? '#e50914' : '#aaa'}
-                />
+                <Ionicons name={inWatchlist ? 'heart' : 'heart-outline'} size={20} color={inWatchlist ? '#e50914' : '#aaa'} />
               </TouchableOpacity>
             )}
           </View>
@@ -397,9 +396,7 @@ export default function MovieScreen({ route, navigation }: any) {
           </View>
         )}
 
-        <Text style={styles.overview}>
-          {movie.overview || 'Описание пока недоступно.'}
-        </Text>
+        <Text style={styles.overview}>{movie.overview || 'Описание пока недоступно.'}</Text>
 
         <View style={styles.statusBlock}>
           <Text style={styles.blockTitle}>Моя оценка</Text>
@@ -471,16 +468,12 @@ export default function MovieScreen({ route, navigation }: any) {
               videoId={movie.trailerKey}
               height={Math.round((width - 40) * 0.56)}
               play={showTrailer}
-              onChangeState={(state: string) => {
-                if (state === 'ended') setShowTrailer(false);
-              }}
+              onChangeState={(state: string) => { if (state === 'ended') setShowTrailer(false); }}
             />
-
             <TouchableOpacity style={styles.closeVideo} onPress={() => setShowTrailer(false)}>
               <Ionicons name="close-circle" size={20} color="#aaa" />
               <Text style={styles.closeVideoText}>Закрыть трейлер</Text>
             </TouchableOpacity>
-
             <TouchableOpacity style={styles.youtubeFallback} onPress={openTrailerInYouTube}>
               <Ionicons name="logo-youtube" size={18} color="#e50914" />
               <Text style={styles.youtubeFallbackText}>Открыть на YouTube</Text>
@@ -500,13 +493,21 @@ export default function MovieScreen({ route, navigation }: any) {
           <Text style={styles.onlineBtnText}>Сервисы просмотра</Text>
         </TouchableOpacity>
 
-        {movie.recommendations?.length > 0 && (
+        {relatedItems.length > 0 && (
           <View style={styles.relatedBlock}>
             <Text style={styles.blockTitle}>Похожие</Text>
-
-            <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-              {movie.recommendations.map((item: any) => (
-                <TouchableOpacity key={`${item.id}-${item.media_type}`} style={styles.relatedCard} onPress={() => openRelated(item)}>
+            <FlatList
+              data={relatedItems}
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              keyExtractor={(item, i) => `${item.id}-${item.media_type}-${i}`}
+              onEndReached={loadMoreRelated}
+              onEndReachedThreshold={0.5}
+              renderItem={({ item }) => (
+                <TouchableOpacity
+                  style={styles.relatedCard}
+                  onPress={() => openRelated(item)}
+                >
                   <Image
                     source={{ uri: `https://image.tmdb.org/t/p/w300${item.poster_path}` }}
                     style={styles.relatedPoster}
@@ -516,8 +517,15 @@ export default function MovieScreen({ route, navigation }: any) {
                   />
                   <Text style={styles.relatedTitle} numberOfLines={2}>{item.title || item.name}</Text>
                 </TouchableOpacity>
-              ))}
-            </ScrollView>
+              )}
+              ListFooterComponent={
+                relatedLoadingMore ? (
+                  <View style={styles.relatedLoadingWrap}>
+                    <ActivityIndicator size="small" color="#555" />
+                  </View>
+                ) : null
+              }
+            />
           </View>
         )}
 
@@ -627,6 +635,7 @@ const styles = StyleSheet.create({
   relatedCard: { width: relatedPosterWidth, marginRight: 10 },
   relatedPoster: { width: relatedPosterWidth, height: relatedPosterWidth * 1.5, borderRadius: 10, marginBottom: 6 },
   relatedTitle: { color: '#ccc', fontSize: 11, textAlign: 'center' },
+  relatedLoadingWrap: { width: relatedPosterWidth, alignItems: 'center', justifyContent: 'center' },
   loadingNext: { paddingVertical: 16, alignItems: 'center' },
   loadingNextText: { color: '#aaa', fontSize: 14 },
   randomBtn: { flexDirection: 'row', alignItems: 'center', gap: 8, borderWidth: 1, borderColor: '#e50914', paddingHorizontal: 32, paddingVertical: 14, borderRadius: 30, marginTop: 8 },

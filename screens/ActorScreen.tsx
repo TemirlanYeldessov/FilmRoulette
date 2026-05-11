@@ -1,7 +1,7 @@
 import { Ionicons } from '@expo/vector-icons';
 import { Image } from 'expo-image';
 import { LinearGradient } from 'expo-linear-gradient';
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   Dimensions,
@@ -12,10 +12,15 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
+import PaginationBar from '../components/PaginationBar';
 import { TMDB_TOKEN } from '../constants/api';
 
 const { width } = Dimensions.get('window');
 const cardWidth = (width - 48) / 2;
+const PAGE_SIZE = 20;
+
+type SortKey = 'popularity' | 'year' | 'rating';
+type TypeFilter = 'all' | 'movie' | 'tv';
 
 async function fetchPerson(personId: number) {
   const [personRes, creditsRes] = await Promise.all([
@@ -26,44 +31,41 @@ async function fetchPerson(personId: number) {
       headers: { Authorization: `Bearer ${TMDB_TOKEN}` },
     }),
   ]);
-
   const person = await personRes.json();
   const credits = await creditsRes.json();
-
   const cast = (credits.cast || [])
-    .filter((c: any) => c.poster_path && (c.media_type === 'movie' || c.media_type === 'tv'))
-    .sort((a: any, b: any) => (b.popularity || 0) - (a.popularity || 0))
-    .slice(0, 40);
-
+    .filter((c: any) => c.poster_path && (c.media_type === 'movie' || c.media_type === 'tv'));
   return { person, cast };
 }
 
-async function fetchDetails(id: number, type: string) {
-  const [ruRes, enRes] = await Promise.all([
-    fetch(`https://api.themoviedb.org/3/${type}/${id}?language=ru-RU`, {
-      headers: { Authorization: `Bearer ${TMDB_TOKEN}` },
-    }),
-    fetch(`https://api.themoviedb.org/3/${type}/${id}?language=en-US`, {
-      headers: { Authorization: `Bearer ${TMDB_TOKEN}` },
-    }),
-  ]);
-  const ruData = await ruRes.json();
-  const enData = await enRes.json();
+function itemToMovie(item: any) {
   return {
-    id,
-    titleRu: ruData.title || ruData.name,
-    titleEn: enData.title || enData.name,
-    overview: ruData.overview || enData.overview,
-    poster: ruData.poster_path ? `https://image.tmdb.org/t/p/w500${ruData.poster_path}` : null,
+    id: item.id,
+    titleRu: item.title || item.name || '',
+    titleEn: item.title || item.name || '',
+    overview: item.overview || '',
+    poster: item.poster_path ? `https://image.tmdb.org/t/p/w500${item.poster_path}` : null,
     trailerKey: null,
-    mediaType: type,
-    rating: ruData.vote_average ? ruData.vote_average.toFixed(1) : null,
-    year: (ruData.release_date || ruData.first_air_date || '').slice(0, 4),
-    country: ruData.production_countries?.[0]?.name || null,
-    genres: ruData.genres?.map((g: any) => g.name).join(', ') || null,
+    mediaType: item.media_type,
+    rating: item.vote_average > 0 ? item.vote_average.toFixed(1) : null,
+    year: (item.release_date || item.first_air_date || '').slice(0, 4),
+    country: null,
+    genres: null,
     genreId: null,
   };
 }
+
+const SORT_OPTS: { key: SortKey; label: string }[] = [
+  { key: 'popularity', label: 'По популярности' },
+  { key: 'rating', label: 'По рейтингу' },
+  { key: 'year', label: 'По году' },
+];
+
+const TYPE_OPTS: { key: TypeFilter; label: string }[] = [
+  { key: 'all', label: 'Всё' },
+  { key: 'movie', label: 'Фильмы' },
+  { key: 'tv', label: 'Сериалы' },
+];
 
 export default function ActorScreen({ route, navigation }: any) {
   const { personId, name } = route.params;
@@ -71,22 +73,125 @@ export default function ActorScreen({ route, navigation }: any) {
   const [cast, setCast] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [bioExpanded, setBioExpanded] = useState(false);
+  const [sortBy, setSortBy] = useState<SortKey>('popularity');
+  const [typeFilter, setTypeFilter] = useState<TypeFilter>('all');
+  const [actorPage, setActorPage] = useState(1);
 
   useEffect(() => {
-    fetchPerson(personId).then(({ person: p, cast: c }) => {
-      setPerson(p);
-      setCast(c);
-      setLoading(false);
-    }).catch(() => setLoading(false));
+    fetchPerson(personId)
+      .then(({ person: p, cast: c }) => {
+        setPerson(p);
+        setCast(c);
+        setLoading(false);
+      })
+      .catch(() => setLoading(false));
   }, [personId]);
 
-  const openCard = async (item: any) => {
-    const details = await fetchDetails(item.id, item.media_type);
-    navigation.navigate('Card', { movie: details });
+  const filteredCast = useMemo(() => {
+    let result = typeFilter === 'all' ? cast : cast.filter(c => c.media_type === typeFilter);
+    switch (sortBy) {
+      case 'year':
+        return [...result].sort((a, b) => {
+          const ya = parseInt((a.release_date || a.first_air_date || '0').slice(0, 4), 10) || 0;
+          const yb = parseInt((b.release_date || b.first_air_date || '0').slice(0, 4), 10) || 0;
+          return yb - ya;
+        });
+      case 'rating':
+        return [...result].sort((a, b) => (b.vote_average || 0) - (a.vote_average || 0));
+      default:
+        return [...result].sort((a, b) => (b.popularity || 0) - (a.popularity || 0));
+    }
+  }, [cast, sortBy, typeFilter]);
+
+  const totalActorPages = Math.ceil(filteredCast.length / PAGE_SIZE) || 1;
+  const pagedCast = filteredCast.slice((actorPage - 1) * PAGE_SIZE, actorPage * PAGE_SIZE);
+
+  const handleSortChange = (key: SortKey) => {
+    setSortBy(key);
+    setActorPage(1);
+  };
+
+  const handleTypeChange = (key: TypeFilter) => {
+    setTypeFilter(key);
+    setActorPage(1);
+  };
+
+  const openCard = (item: any) => {
+    navigation.navigate('Card', { movie: itemToMovie(item) });
   };
 
   const bio = person?.biography || '';
   const bioShort = bio.length > 220 ? bio.slice(0, 220) + '...' : bio;
+
+  const ListHeader = (
+    <View style={styles.header}>
+      {person?.profile_path ? (
+        <Image
+          source={{ uri: `https://image.tmdb.org/t/p/w300${person.profile_path}` }}
+          style={styles.photo}
+          contentFit="cover"
+          transition={300}
+        />
+      ) : (
+        <View style={[styles.photo, styles.photoFallback]}>
+          <Ionicons name="person" size={48} color="#555" />
+        </View>
+      )}
+
+      <Text style={styles.name}>{person?.name || name}</Text>
+
+      {person?.birthday && (
+        <Text style={styles.meta}>
+          {person.birthday.slice(0, 4)}
+          {person.place_of_birth ? ` · ${person.place_of_birth}` : ''}
+        </Text>
+      )}
+
+      {bio.length > 0 && (
+        <View style={styles.bioBlock}>
+          <Text style={styles.bioText}>{bioExpanded ? bio : bioShort}</Text>
+          {bio.length > 220 && (
+            <TouchableOpacity onPress={() => setBioExpanded(v => !v)}>
+              <Text style={styles.bioToggle}>{bioExpanded ? 'Свернуть' : 'Читать полностью'}</Text>
+            </TouchableOpacity>
+          )}
+        </View>
+      )}
+
+      {cast.length > 0 && (
+        <>
+          <Text style={styles.sectionTitle}>
+            Фильмография ({filteredCast.length}{typeFilter !== 'all' ? ` из ${cast.length}` : ''})
+          </Text>
+
+          <View style={styles.controlsRow}>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+              <View style={styles.chipRow}>
+                {TYPE_OPTS.map(t => (
+                  <TouchableOpacity
+                    key={t.key}
+                    style={[styles.chip, typeFilter === t.key && styles.chipActive]}
+                    onPress={() => handleTypeChange(t.key)}
+                  >
+                    <Text style={[styles.chipText, typeFilter === t.key && styles.chipTextActive]}>{t.label}</Text>
+                  </TouchableOpacity>
+                ))}
+                {SORT_OPTS.map(s => (
+                  <TouchableOpacity
+                    key={s.key}
+                    style={[styles.chip, sortBy === s.key && styles.chipSortActive]}
+                    onPress={() => handleSortChange(s.key)}
+                  >
+                    <Text style={[styles.chipText, sortBy === s.key && styles.chipSortTextActive]}>{s.label}</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            </ScrollView>
+          </View>
+        </>
+      )}
+    </View>
+  );
 
   return (
     <LinearGradient colors={['#0f0f1a', '#1a1a2e']} style={styles.container}>
@@ -101,50 +206,24 @@ export default function ActorScreen({ route, navigation }: any) {
         </View>
       ) : (
         <FlatList
-          data={cast}
+          data={pagedCast}
           keyExtractor={(item, i) => `${item.id}-${item.media_type}-${i}`}
           numColumns={2}
           contentContainerStyle={styles.grid}
           columnWrapperStyle={styles.row}
-          ListHeaderComponent={
-            <View style={styles.header}>
-              {person?.profile_path ? (
-                <Image
-                  source={{ uri: `https://image.tmdb.org/t/p/w300${person.profile_path}` }}
-                  style={styles.photo}
-                  contentFit="cover"
-                  transition={300}
-                />
-              ) : (
-                <View style={[styles.photo, styles.photoFallback]}>
-                  <Ionicons name="person" size={48} color="#555" />
-                </View>
-              )}
-
-              <Text style={styles.name}>{person?.name || name}</Text>
-
-              {person?.birthday && (
-                <Text style={styles.meta}>
-                  {person.birthday.slice(0, 4)}
-                  {person.place_of_birth ? ` · ${person.place_of_birth}` : ''}
-                </Text>
-              )}
-
-              {bio.length > 0 && (
-                <View style={styles.bioBlock}>
-                  <Text style={styles.bioText}>{bioExpanded ? bio : bioShort}</Text>
-                  {bio.length > 220 && (
-                    <TouchableOpacity onPress={() => setBioExpanded(v => !v)}>
-                      <Text style={styles.bioToggle}>{bioExpanded ? 'Свернуть' : 'Читать полностью'}</Text>
-                    </TouchableOpacity>
-                  )}
-                </View>
-              )}
-
-              {cast.length > 0 && (
-                <Text style={styles.sectionTitle}>Фильмография ({cast.length})</Text>
-              )}
+          ListHeaderComponent={ListHeader}
+          ListEmptyComponent={
+            <View style={styles.empty}>
+              <Text style={styles.emptyText}>Нет результатов</Text>
             </View>
+          }
+          ListFooterComponent={
+            <PaginationBar
+              currentPage={actorPage}
+              totalPages={totalActorPages}
+              totalResults={filteredCast.length}
+              onPageChange={setActorPage}
+            />
           }
           renderItem={({ item }) => (
             <TouchableOpacity style={styles.card} onPress={() => openCard(item)}>
@@ -162,13 +241,13 @@ export default function ActorScreen({ route, navigation }: any) {
               {item.vote_average > 0 && (
                 <Text style={styles.cardRating}>★ {item.vote_average.toFixed(1)}</Text>
               )}
+              {(item.release_date || item.first_air_date) && (
+                <Text style={styles.cardYear}>
+                  {(item.release_date || item.first_air_date).slice(0, 4)}
+                </Text>
+              )}
             </TouchableOpacity>
           )}
-          ListEmptyComponent={
-            <View style={styles.empty}>
-              <Text style={styles.emptyText}>Фильмография недоступна</Text>
-            </View>
-          }
         />
       )}
     </LinearGradient>
@@ -188,15 +267,24 @@ const styles = StyleSheet.create({
   bioBlock: { width: '100%', marginBottom: 16 },
   bioText: { color: '#bbb', fontSize: 14, lineHeight: 22, textAlign: 'center' },
   bioToggle: { color: '#8888ff', fontSize: 13, textAlign: 'center', marginTop: 6 },
-  sectionTitle: { fontSize: 17, fontWeight: '700', color: '#fff', alignSelf: 'flex-start', marginTop: 4 },
+  sectionTitle: { fontSize: 17, fontWeight: '700', color: '#fff', alignSelf: 'flex-start', marginTop: 4, marginBottom: 12 },
+  controlsRow: { width: '100%', marginBottom: 8 },
+  chipRow: { flexDirection: 'row', gap: 8, paddingBottom: 4 },
+  chip: { paddingHorizontal: 12, paddingVertical: 7, borderRadius: 16, borderWidth: 1, borderColor: '#333' },
+  chipActive: { backgroundColor: '#e50914', borderColor: '#e50914' },
+  chipSortActive: { backgroundColor: '#1e1e40', borderColor: '#8888ff' },
+  chipText: { color: '#666', fontSize: 12 },
+  chipTextActive: { color: '#fff', fontWeight: '600' },
+  chipSortTextActive: { color: '#8888ff', fontWeight: '600' },
   grid: { paddingHorizontal: 12, paddingBottom: 32 },
   row: { justifyContent: 'space-between', marginBottom: 12 },
   card: { width: cardWidth },
   typeBadge: { position: 'absolute', top: 8, left: 8, backgroundColor: '#1a1a40', borderRadius: 10, paddingHorizontal: 8, paddingVertical: 3, zIndex: 1 },
   typeBadgeText: { color: '#8888ff', fontSize: 11, fontWeight: '600' },
   poster: { width: cardWidth, height: cardWidth * 1.5, borderRadius: 10, marginBottom: 6 },
-  cardTitle: { color: '#fff', fontSize: 12, fontWeight: '600', marginBottom: 3 },
+  cardTitle: { color: '#fff', fontSize: 12, fontWeight: '600', marginBottom: 2 },
   cardRating: { color: '#aaa', fontSize: 11 },
+  cardYear: { color: '#555', fontSize: 11 },
   empty: { alignItems: 'center', paddingTop: 40 },
   emptyText: { color: '#555', fontSize: 14 },
 });

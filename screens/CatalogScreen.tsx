@@ -15,6 +15,7 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
+import PaginationBar from '../components/PaginationBar';
 import { HorizontalCardSkeleton, MovieCardSkeleton } from '../components/Skeleton';
 import { useAppContext } from '../store/AppContext';
 import { TMDB_TOKEN as TOKEN } from '../constants/api';
@@ -111,7 +112,8 @@ const CONTENT_TYPES = [
 
 const RATINGS = [0, 5, 6, 7, 8, 9];
 const MAX_RATINGS = [10, 9, 8, 7, 6, 5];
-const searchSkeletons = Array.from({ length: 6 }, (_, i) => i);
+const SKELETON_KEYS = [0, 1, 2, 3, 4, 5];
+const TRENDING_PAGE_CAP = 10;
 
 const defaultFilters = {
   mediaType: 'all',
@@ -128,21 +130,44 @@ const defaultFilters = {
 async function fetchWithTimeout(url: string, options: any = {}, timeout = 10000) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeout);
-
   try {
     const res = await fetch(url, { ...options, signal: controller.signal });
     clearTimeout(timer);
-
-    if (!res.ok) {
-      throw new Error('TMDB временно не отвечает. Попробуй еще раз.');
-    }
-
+    if (!res.ok) throw new Error('TMDB временно не отвечает. Попробуй еще раз.');
     return res;
   } catch (e: any) {
     clearTimeout(timer);
     if (e.name === 'AbortError') throw new Error('Превышено время ожидания.');
     throw e;
   }
+}
+
+function dedup(items: any[]): any[] {
+  const seen = new Set<string>();
+  return items.filter(item => {
+    const key = `${item.media_type || ''}-${item.id}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function itemToMovie(item: any, fallbackType: string) {
+  const type = item.media_type || fallbackType;
+  return {
+    id: item.id,
+    titleRu: item.title || item.name || '',
+    titleEn: item.title || item.name || '',
+    overview: item.overview || '',
+    poster: item.poster_path ? `https://image.tmdb.org/t/p/w500${item.poster_path}` : null,
+    trailerKey: null,
+    mediaType: type,
+    rating: item.vote_average > 0 ? item.vote_average.toFixed(1) : null,
+    year: (item.release_date || item.first_air_date || '').slice(0, 4),
+    country: null,
+    genres: null,
+    genreId: null,
+  };
 }
 
 async function getTrailer(id: number, type: string) {
@@ -154,7 +179,6 @@ async function getTrailer(id: number, type: string) {
     const dataRu = await resRu.json();
     const trailerRu = dataRu.results?.find((v: any) => v.type === 'Trailer' && v.site === 'YouTube');
     if (trailerRu) return trailerRu.key;
-
     const resEn = await fetchWithTimeout(
       `https://api.themoviedb.org/3/${type}/${id}/videos?language=en-US`,
       { headers: { Authorization: `Bearer ${TOKEN}` } }
@@ -175,11 +199,9 @@ async function fetchDetails(id: number, type: string) {
       headers: { Authorization: `Bearer ${TOKEN}` },
     }),
   ]);
-
   const ruData = await ruRes.json();
   const enData = await enRes.json();
   const trailerKey = await getTrailer(id, type);
-
   return {
     id,
     titleRu: ruData.title || ruData.name,
@@ -195,7 +217,13 @@ async function fetchDetails(id: number, type: string) {
   };
 }
 
-async function fetchRandom(selectedGenres: number[], mediaType: string, adultContent: boolean, filters: any, recentRandomIds: string[]) {
+async function fetchRandom(
+  selectedGenres: number[],
+  mediaType: string,
+  adultContent: boolean,
+  filters: any,
+  recentRandomIds: string[]
+) {
   const type = mediaType;
   const params: any = {
     sort_by: 'popularity.desc',
@@ -203,7 +231,6 @@ async function fetchRandom(selectedGenres: number[], mediaType: string, adultCon
     include_adult: String(adultContent),
   };
   const genres = selectedGenres.filter(g => g !== 0);
-
   if (genres.length > 0) params.with_genres = genres.join(',');
   if (filters.yearFrom) params[type === 'movie' ? 'primary_release_date.gte' : 'first_air_date.gte'] = `${filters.yearFrom}-01-01`;
   if (filters.yearTo) params[type === 'movie' ? 'primary_release_date.lte' : 'first_air_date.lte'] = `${filters.yearTo}-12-31`;
@@ -216,15 +243,15 @@ async function fetchRandom(selectedGenres: number[], mediaType: string, adultCon
     const url = `https://api.themoviedb.org/3/discover/${type}?${new URLSearchParams(params)}`;
     const res = await fetchWithTimeout(url, { headers: { Authorization: `Bearer ${TOKEN}` } });
     const data = await res.json();
-    const items = (data.results || []).filter((m: any) => m.poster_path && !recentRandomIds.includes(`${type}-${m.id}`));
-
+    const items = (data.results || []).filter(
+      (m: any) => m.poster_path && !recentRandomIds.includes(`${type}-${m.id}`)
+    );
     if (items.length > 0) {
       const item = items[Math.floor(Math.random() * items.length)];
       const details = await fetchDetails(item.id, type);
       return { ...details, genreId: genres[0] ?? 0, selectedGenres: genres };
     }
   }
-
   throw new Error('Новых вариантов по этим условиям не осталось. Попробуй изменить фильтры.');
 }
 
@@ -234,51 +261,78 @@ async function searchItems(query: string, adultContent: boolean, page = 1) {
     { headers: { Authorization: `Bearer ${TOKEN}` } }
   );
   const data = await res.json();
-  const results = (data.results || []).filter((m: any) => {
-    return (m.media_type === 'movie' || m.media_type === 'tv') && m.poster_path;
-  });
-  return { results, totalPages: data.total_pages ?? 1 };
+  const results = (data.results || []).filter(
+    (m: any) => (m.media_type === 'movie' || m.media_type === 'tv') && m.poster_path
+  );
+  return {
+    results,
+    totalPages: Math.min(data.total_pages ?? 1, 500),
+    totalResults: data.total_results ?? 0,
+  };
 }
 
-async function discoverItems(filters: any, adultContent: boolean) {
+function sortMerged(items: any[], sortBy: string): any[] {
+  return [...items].sort((a, b) => {
+    switch (sortBy) {
+      case 'vote_average.desc':
+        return (b.vote_average || 0) - (a.vote_average || 0);
+      case 'release_date.desc':
+        return new Date(b.release_date || b.first_air_date || '').getTime() -
+               new Date(a.release_date || a.first_air_date || '').getTime();
+      case 'release_date.asc':
+        return new Date(a.release_date || a.first_air_date || '').getTime() -
+               new Date(b.release_date || b.first_air_date || '').getTime();
+      default:
+        return (b.popularity || 0) - (a.popularity || 0);
+    }
+  });
+}
+
+async function discoverItems(filters: any, adultContent: boolean, page = 1) {
   const types = filters.mediaType === 'all' ? ['movie', 'tv'] : [filters.mediaType];
 
   const requests = types.map(async (type) => {
     const params: any = {
       language: 'ru-RU',
       sort_by: filters.sortBy || 'popularity.desc',
-      page: '1',
+      page: String(page),
       include_adult: String(adultContent),
     };
-
     if (filters.genreId) params.with_genres = String(filters.genreId);
     if (filters.minRating > 0) params['vote_average.gte'] = String(filters.minRating);
     if (filters.maxRating < 10) params['vote_average.lte'] = String(filters.maxRating);
     if (filters.language) params.with_original_language = filters.language;
     if (filters.country) params.with_origin_country = filters.country;
-    if (filters.yearFrom) params[type === 'movie' ? 'primary_release_date.gte' : 'first_air_date.gte'] = `${filters.yearFrom}-01-01`;
-    if (filters.yearTo) params[type === 'movie' ? 'primary_release_date.lte' : 'first_air_date.lte'] = `${filters.yearTo}-12-31`;
+    if (filters.yearFrom)
+      params[type === 'movie' ? 'primary_release_date.gte' : 'first_air_date.gte'] = `${filters.yearFrom}-01-01`;
+    if (filters.yearTo)
+      params[type === 'movie' ? 'primary_release_date.lte' : 'first_air_date.lte'] = `${filters.yearTo}-12-31`;
 
     const url = `https://api.themoviedb.org/3/discover/${type}?${new URLSearchParams(params)}`;
     const res = await fetchWithTimeout(url, { headers: { Authorization: `Bearer ${TOKEN}` } });
     const data = await res.json();
-
-    return (data.results || [])
-      .filter((m: any) => m.poster_path)
-      .map((m: any) => ({ ...m, media_type: type }));
+    return {
+      results: (data.results || []).filter((m: any) => m.poster_path).map((m: any) => ({ ...m, media_type: type })),
+      totalPages: Math.min(data.total_pages || 1, 500),
+      totalResults: data.total_results || 0,
+    };
   });
 
-  const results = await Promise.all(requests);
-  return results.flat().sort((a, b) => (b.popularity || 0) - (a.popularity || 0));
+  const typed = await Promise.all(requests);
+  const merged = sortMerged(
+    dedup(typed.flatMap(t => t.results)),
+    filters.sortBy || 'popularity.desc'
+  );
+  const totalPages = Math.max(...typed.map(t => t.totalPages));
+  const totalResults = typed.reduce((sum, t) => sum + t.totalResults, 0);
+  return { results: merged, totalPages, totalResults };
 }
 
 function FilterSheet({ visible, onClose, filters, onApply }: any) {
   const [local, setLocal] = useState(filters);
   const genres = local.mediaType === 'tv' ? TV_GENRES : MOVIE_GENRES;
 
-  useEffect(() => {
-    setLocal(filters);
-  }, [filters]);
+  useEffect(() => { setLocal(filters); }, [filters]);
 
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
@@ -286,7 +340,6 @@ function FilterSheet({ visible, onClose, filters, onApply }: any) {
         <TouchableOpacity activeOpacity={1} style={fStyles.sheet}>
           <View style={fStyles.handle} />
           <Text style={fStyles.title}>Фильтры</Text>
-
           <ScrollView showsVerticalScrollIndicator={false}>
             <Text style={fStyles.label}>Тип контента</Text>
             <ScrollView horizontal showsHorizontalScrollIndicator={false}>
@@ -307,7 +360,11 @@ function FilterSheet({ visible, onClose, filters, onApply }: any) {
             <ScrollView horizontal showsHorizontalScrollIndicator={false}>
               <View style={fStyles.chipRow}>
                 {genres.map(g => (
-                  <TouchableOpacity key={g.id} style={[fStyles.chip, local.genreId === g.id && fStyles.chipActive]} onPress={() => setLocal({ ...local, genreId: g.id })}>
+                  <TouchableOpacity
+                    key={g.id}
+                    style={[fStyles.chip, local.genreId === g.id && fStyles.chipActive]}
+                    onPress={() => setLocal({ ...local, genreId: g.id })}
+                  >
                     <Text style={[fStyles.chipText, local.genreId === g.id && fStyles.chipTextActive]}>{g.name}</Text>
                   </TouchableOpacity>
                 ))}
@@ -394,45 +451,82 @@ function FilterSheet({ visible, onClose, filters, onApply }: any) {
 export default function CatalogScreen({ navigation }: any) {
   const { adultContent, recentRandomIds, addRecentRandom } = useAppContext();
   const [mediaType, setMediaType] = useState<'movie' | 'tv'>('movie');
+
+  // Trending
   const [trending, setTrending] = useState<any[]>([]);
   const [trendingLoading, setTrendingLoading] = useState(true);
+  const [trendingPage, setTrendingPage] = useState(1);
+  const [trendingTotal, setTrendingTotal] = useState(1);
+  const [trendingLoadingMore, setTrendingLoadingMore] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+
+  // Random
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
-  const [showFilters, setShowFilters] = useState(false);
-  const [showPreciseFilters, setShowPreciseFilters] = useState(false);
-  const [filters, setFilters] = useState(defaultFilters);
+  const [selectedGenres, setSelectedGenres] = useState<number[]>([0]);
   const [preciseFilters, setPreciseFilters] = useState({ yearFrom: '', yearTo: '', minRating: 0, maxRating: 10, country: '' });
+  const [showPreciseFilters, setShowPreciseFilters] = useState(false);
+
+  // Filters modal
+  const [showFilters, setShowFilters] = useState(false);
+  const [filters, setFilters] = useState(defaultFilters);
+
+  // Search & results
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<any[]>([]);
   const [searching, setSearching] = useState(false);
   const [isSearchMode, setIsSearchMode] = useState(false);
-  const [searchPage, setSearchPage] = useState(1);
-  const [searchHasMore, setSearchHasMore] = useState(false);
-  const [loadingMore, setLoadingMore] = useState(false);
-  const [selectedGenres, setSelectedGenres] = useState<number[]>([0]);
+  const [currentPage, setCurrentPage] = useState(1);
+  const [totalPages, setTotalPages] = useState(1);
+  const [totalResults, setTotalResults] = useState(0);
+
   const searchRequestRef = useRef(0);
   const lastQueryRef = useRef('');
+  const activeFiltersRef = useRef(defaultFilters);
+  const resultsListRef = useRef<FlatList>(null);
   const genres = mediaType === 'tv' ? TV_GENRES : MOVIE_GENRES;
 
-  const loadTrending = useCallback(async () => {
+  const loadTrending = useCallback(async (mt: string, page: number, append: boolean) => {
+    if (page === 1) setTrendingLoading(true);
+    else setTrendingLoadingMore(true);
     try {
       const res = await fetchWithTimeout(
-        `https://api.themoviedb.org/3/trending/${mediaType}/week?language=ru-RU`,
+        `https://api.themoviedb.org/3/trending/${mt}/week?language=ru-RU&page=${page}`,
         { headers: { Authorization: `Bearer ${TOKEN}` } }
       );
       const data = await res.json();
-      setTrending(data.results.filter((m: any) => m.poster_path).slice(0, 10));
+      const results = (data.results || []).filter((m: any) => m.poster_path);
+      setTrending(prev => append ? dedup([...prev, ...results]) : results);
+      setTrendingTotal(Math.min(data.total_pages || 1, TRENDING_PAGE_CAP));
+      setTrendingPage(page);
     } catch (e) {
       console.error(e);
     }
-  }, [mediaType]);
+    setTrendingLoading(false);
+    setTrendingLoadingMore(false);
+  }, []);
 
   useEffect(() => {
     setTrendingLoading(true);
-    loadTrending().finally(() => setTrendingLoading(false));
-  }, [loadTrending]);
+    setTrendingPage(1);
+    setTrending([]);
+    loadTrending(mediaType, 1, false);
+  }, [mediaType, loadTrending]);
 
+  const loadMoreTrending = () => {
+    if (trendingLoadingMore || trendingPage >= trendingTotal) return;
+    loadTrending(mediaType, trendingPage + 1, true);
+  };
+
+  const onRefresh = useCallback(async () => {
+    setRefreshing(true);
+    setTrendingPage(1);
+    setTrending([]);
+    await loadTrending(mediaType, 1, false);
+    setRefreshing(false);
+  }, [mediaType, loadTrending]);
+
+  // Debounced text search
   useEffect(() => {
     const q = searchQuery.trim();
     const requestId = searchRequestRef.current + 1;
@@ -451,32 +545,27 @@ export default function CatalogScreen({ navigation }: any) {
 
     const timer = setTimeout(async () => {
       try {
-        const { results, totalPages } = await searchItems(q, adultContent, 1);
+        const { results, totalPages: tp, totalResults: tr } = await searchItems(q, adultContent, 1);
         if (searchRequestRef.current === requestId) {
           lastQueryRef.current = q;
           setSearchResults(results);
-          setSearchPage(1);
-          setSearchHasMore(totalPages > 1);
+          setCurrentPage(1);
+          setTotalPages(tp);
+          setTotalResults(tr);
         }
       } catch (e: any) {
         if (searchRequestRef.current === requestId) {
           setError(e.message || 'Не удалось выполнить поиск.');
           setSearchResults([]);
-          setSearchHasMore(false);
+          setTotalPages(1);
+          setTotalResults(0);
         }
       }
-
       if (searchRequestRef.current === requestId) setSearching(false);
     }, 450);
 
     return () => clearTimeout(timer);
   }, [searchQuery, adultContent]);
-
-  const onRefresh = useCallback(async () => {
-    setRefreshing(true);
-    await loadTrending();
-    setRefreshing(false);
-  }, [loadTrending]);
 
   const clearSearchMode = () => {
     searchRequestRef.current += 1;
@@ -486,54 +575,65 @@ export default function CatalogScreen({ navigation }: any) {
     setSearching(false);
     setFilters(defaultFilters);
     setError('');
-    setSearchPage(1);
-    setSearchHasMore(false);
-  };
-
-  const loadMoreSearchResults = async () => {
-    if (loadingMore || !searchHasMore || !lastQueryRef.current) return;
-    setLoadingMore(true);
-    try {
-      const nextPage = searchPage + 1;
-      const { results, totalPages } = await searchItems(lastQueryRef.current, adultContent, nextPage);
-      setSearchResults(prev => [...prev, ...results]);
-      setSearchPage(nextPage);
-      setSearchHasMore(nextPage < totalPages);
-    } catch {
-      // silent
-    }
-    setLoadingMore(false);
+    setCurrentPage(1);
+    setTotalPages(1);
+    setTotalResults(0);
   };
 
   const handleFilterSearch = async (f: any) => {
     searchRequestRef.current += 1;
+    lastQueryRef.current = '';
+    activeFiltersRef.current = f;
     setFilters(f);
     setIsSearchMode(true);
     setSearching(true);
     setSearchQuery('');
     setError('');
-
+    setCurrentPage(1);
     try {
-      const results = await discoverItems(f, adultContent);
+      const { results, totalPages: tp, totalResults: tr } = await discoverItems(f, adultContent, 1);
       setSearchResults(results);
+      setTotalPages(tp);
+      setTotalResults(tr);
     } catch (e: any) {
       setError(e.message || 'Не удалось применить фильтры.');
       setSearchResults([]);
+      setTotalPages(1);
+      setTotalResults(0);
     }
-
     setSearching(false);
   };
 
-  const openCard = async (item: any) => {
-    const type = item.media_type || mediaType;
-    const details = await fetchDetails(item.id, type);
-    navigation.navigate('Card', { movie: { ...details, genreId: null } });
+  const handlePageChange = async (page: number) => {
+    if (searching) return;
+    setCurrentPage(page);
+    setSearching(true);
+    resultsListRef.current?.scrollToOffset({ offset: 0, animated: false });
+    try {
+      if (lastQueryRef.current) {
+        const { results, totalPages: tp, totalResults: tr } = await searchItems(lastQueryRef.current, adultContent, page);
+        setSearchResults(results);
+        setTotalPages(tp);
+        setTotalResults(tr);
+      } else {
+        const { results, totalPages: tp, totalResults: tr } = await discoverItems(activeFiltersRef.current, adultContent, page);
+        setSearchResults(results);
+        setTotalPages(tp);
+        setTotalResults(tr);
+      }
+    } catch {
+      // silent — keep current results
+    }
+    setSearching(false);
+  };
+
+  const openCard = (item: any) => {
+    navigation.navigate('Card', { movie: itemToMovie(item, mediaType) });
   };
 
   const openRandom = async () => {
     setLoading(true);
     setError('');
-
     try {
       const movie = await fetchRandom(selectedGenres, mediaType, adultContent, preciseFilters, recentRandomIds);
       addRecentRandom(movie.id, movie.mediaType);
@@ -541,24 +641,17 @@ export default function CatalogScreen({ navigation }: any) {
     } catch (e: any) {
       setError(e.message || 'Не удалось подобрать случайный тайтл.');
     }
-
     setLoading(false);
   };
 
   const toggleGenre = (id: number) => {
-    if (id === 0) {
-      setSelectedGenres([0]);
-      return;
-    }
-
+    if (id === 0) { setSelectedGenres([0]); return; }
     setSelectedGenres(prev => {
       const without0 = prev.filter(g => g !== 0);
-
       if (without0.includes(id)) {
         const next = without0.filter(g => g !== id);
         return next.length === 0 ? [0] : next;
       }
-
       return [...without0, id];
     });
   };
@@ -570,12 +663,17 @@ export default function CatalogScreen({ navigation }: any) {
       <View style={styles.header}>
         {!isSearchMode && (
           <View style={styles.switcher}>
-            <TouchableOpacity style={[styles.switchBtn, mediaType === 'movie' && styles.switchBtnActive]} onPress={() => { setMediaType('movie'); setSelectedGenres([0]); }}>
+            <TouchableOpacity
+              style={[styles.switchBtn, mediaType === 'movie' && styles.switchBtnActive]}
+              onPress={() => { setMediaType('movie'); setSelectedGenres([0]); }}
+            >
               <Ionicons name="film" size={16} color={mediaType === 'movie' ? '#fff' : '#666'} />
               <Text style={[styles.switchText, mediaType === 'movie' && styles.switchTextActive]}>Фильмы</Text>
             </TouchableOpacity>
-
-            <TouchableOpacity style={[styles.switchBtn, mediaType === 'tv' && styles.switchBtnActive]} onPress={() => { setMediaType('tv'); setSelectedGenres([0]); }}>
+            <TouchableOpacity
+              style={[styles.switchBtn, mediaType === 'tv' && styles.switchBtnActive]}
+              onPress={() => { setMediaType('tv'); setSelectedGenres([0]); }}
+            >
               <Ionicons name="tv" size={16} color={mediaType === 'tv' ? '#fff' : '#666'} />
               <Text style={[styles.switchText, mediaType === 'tv' && styles.switchTextActive]}>Сериалы</Text>
             </TouchableOpacity>
@@ -599,7 +697,6 @@ export default function CatalogScreen({ navigation }: any) {
               </TouchableOpacity>
             )}
           </View>
-
           <TouchableOpacity style={styles.filterBtn} onPress={() => setShowFilters(true)}>
             <Ionicons name="options" size={20} color="#fff" />
           </TouchableOpacity>
@@ -613,12 +710,14 @@ export default function CatalogScreen({ navigation }: any) {
               <Ionicons name="chevron-back" size={18} color="#8888ff" />
               <Text style={styles.resultsBackText}>Назад к каталогу</Text>
             </TouchableOpacity>
-            <Text style={styles.resultsTitle}>Результаты</Text>
+            <Text style={styles.resultsTitle}>
+              {searchQuery.trim() ? 'Результаты поиска' : 'Результаты фильтров'}
+            </Text>
           </View>
 
           {searching ? (
             <FlatList
-              data={searchSkeletons}
+              data={SKELETON_KEYS}
               keyExtractor={item => String(item)}
               numColumns={2}
               contentContainerStyle={styles.grid}
@@ -638,6 +737,7 @@ export default function CatalogScreen({ navigation }: any) {
             </View>
           ) : (
             <FlatList
+              ref={resultsListRef}
               data={searchResults}
               keyExtractor={(item, i) => `${item.id}-${item.media_type || mediaType}-${i}`}
               numColumns={2}
@@ -648,41 +748,71 @@ export default function CatalogScreen({ navigation }: any) {
                   <View style={styles.typeBadge}>
                     <Text style={styles.typeBadgeText}>{item.media_type === 'tv' ? 'Сериал' : 'Фильм'}</Text>
                   </View>
-                  <Image source={{ uri: `https://image.tmdb.org/t/p/w300${item.poster_path}` }} style={styles.poster} contentFit="cover" transition={200} cachePolicy="memory-disk" />
+                  <Image
+                    source={{ uri: `https://image.tmdb.org/t/p/w300${item.poster_path}` }}
+                    style={styles.poster}
+                    contentFit="cover"
+                    transition={200}
+                    cachePolicy="memory-disk"
+                  />
                   <Text style={styles.cardTitle} numberOfLines={2}>{item.title || item.name}</Text>
                   {item.vote_average > 0 && <Text style={styles.cardRating}>★ {item.vote_average.toFixed(1)}</Text>}
                 </TouchableOpacity>
               )}
               ListFooterComponent={
-                searchHasMore ? (
-                  <TouchableOpacity style={styles.loadMoreBtn} onPress={loadMoreSearchResults} disabled={loadingMore}>
-                    {loadingMore
-                      ? <ActivityIndicator size="small" color="#e50914" />
-                      : <Text style={styles.loadMoreText}>Показать ещё</Text>}
-                  </TouchableOpacity>
-                ) : null
+                <PaginationBar
+                  currentPage={currentPage}
+                  totalPages={totalPages}
+                  totalResults={totalResults}
+                  onPageChange={handlePageChange}
+                  loading={searching}
+                />
               }
             />
           )}
         </View>
       ) : (
-        <ScrollView contentContainerStyle={styles.scroll} refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#e50914" />}>
+        <ScrollView
+          contentContainerStyle={styles.scroll}
+          refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#e50914" />}
+        >
           <Text style={styles.sectionTitle}>Новинки недели</Text>
 
           {trendingLoading ? (
-            <FlatList data={[1, 2, 3, 4, 5]} horizontal showsHorizontalScrollIndicator={false} keyExtractor={i => String(i)} renderItem={() => <HorizontalCardSkeleton />} />
+            <FlatList
+              data={[1, 2, 3, 4, 5]}
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              keyExtractor={i => String(i)}
+              renderItem={() => <HorizontalCardSkeleton />}
+            />
           ) : (
             <FlatList
               data={trending}
               horizontal
               showsHorizontalScrollIndicator={false}
-              keyExtractor={item => item.id.toString()}
+              keyExtractor={item => `${item.id}`}
+              onEndReached={loadMoreTrending}
+              onEndReachedThreshold={0.6}
               renderItem={({ item }) => (
                 <TouchableOpacity onPress={() => openCard(item)} style={styles.trendCard}>
-                  <Image source={{ uri: `https://image.tmdb.org/t/p/w300${item.poster_path}` }} style={styles.trendImage} contentFit="cover" transition={200} cachePolicy="memory-disk" />
+                  <Image
+                    source={{ uri: `https://image.tmdb.org/t/p/w300${item.poster_path}` }}
+                    style={styles.trendImage}
+                    contentFit="cover"
+                    transition={200}
+                    cachePolicy="memory-disk"
+                  />
                   <Text style={styles.trendTitle} numberOfLines={2}>{item.title || item.name}</Text>
                 </TouchableOpacity>
               )}
+              ListFooterComponent={
+                trendingLoadingMore ? (
+                  <View style={styles.trendCard}>
+                    <HorizontalCardSkeleton />
+                  </View>
+                ) : null
+              }
             />
           )}
 
@@ -691,8 +821,22 @@ export default function CatalogScreen({ navigation }: any) {
           <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 12 }}>
             <View style={styles.genreRow}>
               {genres.map(g => (
-                <TouchableOpacity key={g.id} style={[styles.genreChip, (g.id === 0 ? isAllGenres : selectedGenres.includes(g.id)) && styles.genreChipActive]} onPress={() => toggleGenre(g.id)}>
-                  <Text style={[styles.genreChipText, (g.id === 0 ? isAllGenres : selectedGenres.includes(g.id)) && styles.genreChipTextActive]}>{g.name}</Text>
+                <TouchableOpacity
+                  key={g.id}
+                  style={[
+                    styles.genreChip,
+                    (g.id === 0 ? isAllGenres : selectedGenres.includes(g.id)) && styles.genreChipActive,
+                  ]}
+                  onPress={() => toggleGenre(g.id)}
+                >
+                  <Text
+                    style={[
+                      styles.genreChipText,
+                      (g.id === 0 ? isAllGenres : selectedGenres.includes(g.id)) && styles.genreChipTextActive,
+                    ]}
+                  >
+                    {g.name}
+                  </Text>
                 </TouchableOpacity>
               ))}
             </View>
@@ -730,7 +874,6 @@ export default function CatalogScreen({ navigation }: any) {
           <TouchableOpacity activeOpacity={1} style={fStyles.sheet}>
             <View style={fStyles.handle} />
             <Text style={fStyles.title}>Подобрать точнее</Text>
-
             <ScrollView showsVerticalScrollIndicator={false}>
               <Text style={fStyles.label}>Год выпуска</Text>
               <View style={fStyles.yearRow}>
@@ -806,7 +949,7 @@ const styles = StyleSheet.create({
   resultsBackText: { color: '#8888ff', fontSize: 14, fontWeight: '600' },
   resultsTitle: { color: '#fff', fontSize: 18, fontWeight: '700' },
   scroll: { padding: 16 },
-  sectionTitle: { fontSize: 18, fontWeight: '700', color: '#fff', marginBottom: 12 },
+  sectionTitle: { fontSize: 18, fontWeight: '700', color: '#fff', marginBottom: 12, marginTop: 8 },
   trendCard: { width: 120, marginRight: 10 },
   trendImage: { width: 120, height: 180, borderRadius: 10, marginBottom: 6 },
   trendTitle: { color: '#ccc', fontSize: 11, textAlign: 'center' },
@@ -833,8 +976,6 @@ const styles = StyleSheet.create({
   empty: { flex: 1, alignItems: 'center', paddingTop: 80, paddingHorizontal: 24 },
   emptyText: { color: '#aaa', fontSize: 16, textAlign: 'center', marginTop: 10 },
   emptyHint: { color: '#555', fontSize: 13, textAlign: 'center', marginTop: 6 },
-  loadMoreBtn: { alignItems: 'center', paddingVertical: 16, marginTop: 4 },
-  loadMoreText: { color: '#e50914', fontSize: 15, fontWeight: '700' },
 });
 
 const fStyles = StyleSheet.create({
