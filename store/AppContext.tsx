@@ -4,6 +4,7 @@ import { createContext, useContext, useEffect, useState } from 'react';
 export type UserMovieStatus = 'want' | 'watched' | 'liked' | 'disliked';
 
 interface AppContextType {
+  hydrated: boolean;
   adultContent: boolean;
   toggleAdultContent: () => void;
   watchlist: any[];
@@ -11,11 +12,12 @@ interface AppContextType {
   removeFromWatchlist: (id: number, mediaType: string) => void;
   isInWatchlist: (id: number, mediaType: string) => boolean;
   userRatings: Record<string, UserMovieStatus>;
-  setUserStatus: (id: number, mediaType: string, status: UserMovieStatus) => void;
+  setUserStatus: (movie: any, status: UserMovieStatus) => void;
   clearUserStatus: (id: number, mediaType: string) => void;
   getUserStatus: (id: number, mediaType: string) => UserMovieStatus | null;
   recentRandomIds: string[];
   addRecentRandom: (id: number, mediaType: string) => void;
+  clearRecentRandom: () => void;
   isRecentlyRandom: (id: number, mediaType: string) => boolean;
   onboardingSeen: boolean;
   markOnboardingSeen: () => void;
@@ -25,92 +27,166 @@ const AppContext = createContext<AppContextType>({} as AppContextType);
 
 const keyForMovie = (id: number, mediaType: string) => `${mediaType}-${id}`;
 
+function safeParse<T>(raw: string | null, fallback: T): T {
+  if (!raw) return fallback;
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    return fallback;
+  }
+}
+
+function toSlimMovie(movie: any) {
+  return {
+    id: movie.id,
+    mediaType: movie.mediaType,
+    titleRu: movie.titleRu,
+    titleEn: movie.titleEn,
+    poster: movie.poster,
+    year: movie.year,
+    rating: movie.rating,
+    overview: movie.overview,
+  };
+}
+
 export function AppProvider({ children }: { children: React.ReactNode }) {
+  const [hydrated, setHydrated] = useState(false);
   const [adultContent, setAdultContent] = useState(false);
   const [watchlist, setWatchlist] = useState<any[]>([]);
   const [userRatings, setUserRatingsState] = useState<Record<string, UserMovieStatus>>({});
   const [recentRandomIds, setRecentRandomIds] = useState<string[]>([]);
   const [onboardingSeen, setOnboardingSeen] = useState(true);
 
+  // Hydrate once from AsyncStorage. Mutations are no-op until this completes,
+  // so user actions taken on initial render can't be overwritten by the resolve.
   useEffect(() => {
-    AsyncStorage.getItem('adultContent').then(val => {
-      if (val === 'true') setAdultContent(true);
-    });
-    AsyncStorage.getItem('watchlist').then(val => {
-      if (val) setWatchlist(JSON.parse(val));
-    });
-    AsyncStorage.getItem('userRatings').then(val => {
-      if (val) setUserRatingsState(JSON.parse(val));
-    });
-    AsyncStorage.getItem('recentRandomIds').then(val => {
-      if (val) setRecentRandomIds(JSON.parse(val));
-    });
-    AsyncStorage.getItem('onboardingSeen').then(val => {
-      setOnboardingSeen(val === 'true');
-    });
+    let mounted = true;
+    (async () => {
+      try {
+        const [adult, w, ratings, recent, onboarding] = await Promise.all([
+          AsyncStorage.getItem('adultContent'),
+          AsyncStorage.getItem('watchlist'),
+          AsyncStorage.getItem('userRatings'),
+          AsyncStorage.getItem('recentRandomIds'),
+          AsyncStorage.getItem('onboardingSeen'),
+        ]);
+        if (!mounted) return;
+        if (adult === 'true') setAdultContent(true);
+        setWatchlist(safeParse<any[]>(w, []).map(toSlimMovie));
+        setUserRatingsState(safeParse(ratings, {}));
+        setRecentRandomIds(safeParse(recent, []));
+        setOnboardingSeen(onboarding === 'true');
+      } finally {
+        if (mounted) setHydrated(true);
+      }
+    })();
+    return () => { mounted = false; };
   }, []);
 
-  const toggleAdultContent = async () => {
-    const next = !adultContent;
-    setAdultContent(next);
-    await AsyncStorage.setItem('adultContent', String(next));
+  // Persist effects — only after hydration to avoid clobbering existing data
+  // with the initial in-memory defaults.
+  useEffect(() => {
+    if (!hydrated) return;
+    AsyncStorage.setItem('adultContent', String(adultContent));
+  }, [adultContent, hydrated]);
+
+  useEffect(() => {
+    if (!hydrated) return;
+    AsyncStorage.setItem('watchlist', JSON.stringify(watchlist));
+  }, [watchlist, hydrated]);
+
+  useEffect(() => {
+    if (!hydrated) return;
+    AsyncStorage.setItem('userRatings', JSON.stringify(userRatings));
+  }, [userRatings, hydrated]);
+
+  useEffect(() => {
+    if (!hydrated) return;
+    AsyncStorage.setItem('recentRandomIds', JSON.stringify(recentRandomIds));
+  }, [recentRandomIds, hydrated]);
+
+  useEffect(() => {
+    if (!hydrated) return;
+    AsyncStorage.setItem('onboardingSeen', String(onboardingSeen));
+  }, [onboardingSeen, hydrated]);
+
+  const toggleAdultContent = () => {
+    if (!hydrated) return;
+    setAdultContent(prev => !prev);
   };
 
-  const addToWatchlist = async (movie: any) => {
-    const exists = watchlist.some(m => m.id === movie.id && m.mediaType === movie.mediaType);
-    if (exists) return;
-
-    const next = [...watchlist, movie];
-    setWatchlist(next);
-    await AsyncStorage.setItem('watchlist', JSON.stringify(next));
+  const addToWatchlist = (movie: any) => {
+    if (!hydrated) return;
+    // Strip heavy nested fields (recommendations, cast, providers, etc.) — the
+    // detail screen re-fetches them on open. Keeping only what the watchlist
+    // grid needs prevents the 6MB AsyncStorage cap from being hit at ~100 items.
+    const slim = toSlimMovie(movie);
+    setWatchlist(prev => {
+      if (prev.some(m => m.id === slim.id && m.mediaType === slim.mediaType)) return prev;
+      return [...prev, slim];
+    });
   };
 
-  const removeFromWatchlist = async (id: number, mediaType: string) => {
-    const next = watchlist.filter(m => !(m.id === id && m.mediaType === mediaType));
-    setWatchlist(next);
-    await AsyncStorage.setItem('watchlist', JSON.stringify(next));
+  const removeFromWatchlist = (id: number, mediaType: string) => {
+    if (!hydrated) return;
+    setWatchlist(prev => prev.filter(m => !(m.id === id && m.mediaType === mediaType)));
   };
 
   const isInWatchlist = (id: number, mediaType: string) => {
     return watchlist.some(m => m.id === id && m.mediaType === mediaType);
   };
 
-  const setUserStatus = async (id: number, mediaType: string, status: UserMovieStatus) => {
-    const next = { ...userRatings, [keyForMovie(id, mediaType)]: status };
-    setUserRatingsState(next);
-    await AsyncStorage.setItem('userRatings', JSON.stringify(next));
+  // Rating a title also saves it to the collection, so the Favorites tab and
+  // its status filters reflect everything the user has graded — not just the
+  // titles they explicitly hearted.
+  const setUserStatus = (movie: any, status: UserMovieStatus) => {
+    if (!hydrated) return;
+    setUserRatingsState(prev => ({ ...prev, [keyForMovie(movie.id, movie.mediaType)]: status }));
+    const slim = toSlimMovie(movie);
+    setWatchlist(prev =>
+      prev.some(m => m.id === slim.id && m.mediaType === slim.mediaType) ? prev : [...prev, slim]
+    );
   };
 
-  const clearUserStatus = async (id: number, mediaType: string) => {
-    const next = { ...userRatings };
-    delete next[keyForMovie(id, mediaType)];
-    setUserRatingsState(next);
-    await AsyncStorage.setItem('userRatings', JSON.stringify(next));
+  const clearUserStatus = (id: number, mediaType: string) => {
+    if (!hydrated) return;
+    setUserRatingsState(prev => {
+      const next = { ...prev };
+      delete next[keyForMovie(id, mediaType)];
+      return next;
+    });
   };
 
   const getUserStatus = (id: number, mediaType: string) => {
     return userRatings[keyForMovie(id, mediaType)] || null;
   };
 
-  const addRecentRandom = async (id: number, mediaType: string) => {
-    const movieKey = keyForMovie(id, mediaType);
-    const next = [movieKey, ...recentRandomIds.filter(k => k !== movieKey)].slice(0, 200);
-    setRecentRandomIds(next);
-    await AsyncStorage.setItem('recentRandomIds', JSON.stringify(next));
+  const addRecentRandom = (id: number, mediaType: string) => {
+    if (!hydrated) return;
+    setRecentRandomIds(prev => {
+      const movieKey = keyForMovie(id, mediaType);
+      return [movieKey, ...prev.filter(k => k !== movieKey)].slice(0, 200);
+    });
+  };
+
+  const clearRecentRandom = () => {
+    if (!hydrated) return;
+    setRecentRandomIds([]);
   };
 
   const isRecentlyRandom = (id: number, mediaType: string) => {
     return recentRandomIds.includes(keyForMovie(id, mediaType));
   };
 
-  const markOnboardingSeen = async () => {
+  const markOnboardingSeen = () => {
+    if (!hydrated) return;
     setOnboardingSeen(true);
-    await AsyncStorage.setItem('onboardingSeen', 'true');
   };
 
   return (
     <AppContext.Provider
       value={{
+        hydrated,
         adultContent,
         toggleAdultContent,
         watchlist,
@@ -123,6 +199,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         getUserStatus,
         recentRandomIds,
         addRecentRandom,
+        clearRecentRandom,
         isRecentlyRandom,
         onboardingSeen,
         markOnboardingSeen,

@@ -4,37 +4,83 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
-  Dimensions,
   FlatList,
   ScrollView,
   StyleSheet,
   Text,
   TouchableOpacity,
+  useWindowDimensions,
   View,
 } from 'react-native';
 import PaginationBar from '../components/PaginationBar';
+import CardMark from '../components/CardMark';
 import { TMDB_TOKEN } from '../constants/api';
 
-const { width } = Dimensions.get('window');
-const cardWidth = (width - 48) / 2;
 const PAGE_SIZE = 20;
 
 type SortKey = 'popularity' | 'year' | 'rating';
 type TypeFilter = 'all' | 'movie' | 'tv';
 
+function assertValidTmdbPayload(data: any) {
+  if (data?.success === false || data?.status_code) {
+    throw new Error(data.status_message || 'TMDB error');
+  }
+  return data;
+}
+
+function withCheckedJson(res: Response) {
+  const json = res.json.bind(res);
+  (res as any).json = async () => assertValidTmdbPayload(await json());
+  return res;
+}
+
+async function fetchWithTimeout(url: string, options: any = {}, timeout = 10000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeout);
+  const externalSignal: AbortSignal | undefined = options.signal;
+  const onExternalAbort = () => controller.abort();
+  if (externalSignal) {
+    if (externalSignal.aborted) controller.abort();
+    else externalSignal.addEventListener('abort', onExternalAbort);
+  }
+  try {
+    const res = await fetch(url, { ...options, signal: controller.signal });
+    if (!res.ok) throw new Error('TMDB временно не отвечает.');
+    return withCheckedJson(res);
+  } catch (e: any) {
+    if (e?.name === 'AbortError') {
+      if (externalSignal?.aborted) throw e;
+      throw new Error('Превышено время ожидания. Проверь интернет.');
+    }
+    throw e;
+  } finally {
+    clearTimeout(timer);
+    if (externalSignal) externalSignal.removeEventListener('abort', onExternalAbort);
+  }
+}
+
 async function fetchPerson(personId: number) {
   const [personRes, creditsRes] = await Promise.all([
-    fetch(`https://api.themoviedb.org/3/person/${personId}?language=ru-RU`, {
+    fetchWithTimeout(`https://api.themoviedb.org/3/person/${personId}?language=ru-RU`, {
       headers: { Authorization: `Bearer ${TMDB_TOKEN}` },
     }),
-    fetch(`https://api.themoviedb.org/3/person/${personId}/combined_credits?language=ru-RU`, {
+    fetchWithTimeout(`https://api.themoviedb.org/3/person/${personId}/combined_credits?language=ru-RU`, {
       headers: { Authorization: `Bearer ${TMDB_TOKEN}` },
     }),
   ]);
   const person = await personRes.json();
   const credits = await creditsRes.json();
+  // Dedup by id+media_type — combined_credits returns multiple entries when an
+  // actor has multiple credits on the same title (different credit_id).
+  const seen = new Set<string>();
   const cast = (credits.cast || [])
-    .filter((c: any) => c.poster_path && (c.media_type === 'movie' || c.media_type === 'tv'));
+    .filter((c: any) => c.poster_path && (c.media_type === 'movie' || c.media_type === 'tv'))
+    .filter((c: any) => {
+      const key = `${c.media_type}-${c.id}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
   return { person, cast };
 }
 
@@ -69,23 +115,37 @@ const TYPE_OPTS: { key: TypeFilter; label: string }[] = [
 
 export default function ActorScreen({ route, navigation }: any) {
   const { personId, name } = route.params;
+  const { width } = useWindowDimensions();
+  const cardWidth = useMemo(() => (width - 48) / 2, [width]);
   const [person, setPerson] = useState<any>(null);
   const [cast, setCast] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
   const [bioExpanded, setBioExpanded] = useState(false);
   const [sortBy, setSortBy] = useState<SortKey>('popularity');
   const [typeFilter, setTypeFilter] = useState<TypeFilter>('all');
   const [actorPage, setActorPage] = useState(1);
+  const [retryToken, setRetryToken] = useState(0);
 
   useEffect(() => {
+    let mounted = true;
+    setLoading(true);
+    setError('');
     fetchPerson(personId)
       .then(({ person: p, cast: c }) => {
+        if (!mounted) return;
         setPerson(p);
         setCast(c);
-        setLoading(false);
       })
-      .catch(() => setLoading(false));
-  }, [personId]);
+      .catch((e: any) => {
+        if (!mounted) return;
+        setError(e?.message || 'Не удалось загрузить актёра.');
+      })
+      .finally(() => {
+        if (mounted) setLoading(false);
+      });
+    return () => { mounted = false; };
+  }, [personId, retryToken]);
 
   const filteredCast = useMemo(() => {
     let result = typeFilter === 'all' ? cast : cast.filter(c => c.media_type === typeFilter);
@@ -121,7 +181,12 @@ export default function ActorScreen({ route, navigation }: any) {
   };
 
   const bio = person?.biography || '';
-  const bioShort = bio.length > 220 ? bio.slice(0, 220) + '...' : bio;
+  const bioShort = (() => {
+    if (bio.length <= 220) return bio;
+    const cut = bio.slice(0, 220);
+    const lastSpace = cut.lastIndexOf(' ');
+    return (lastSpace > 150 ? cut.slice(0, lastSpace) : cut) + '…';
+  })();
 
   const ListHeader = (
     <View style={styles.header}>
@@ -204,6 +269,14 @@ export default function ActorScreen({ route, navigation }: any) {
         <View style={styles.loadingBox}>
           <ActivityIndicator size="large" color="#e50914" />
         </View>
+      ) : error ? (
+        <View style={styles.errorBox}>
+          <Ionicons name="cloud-offline-outline" size={42} color="#555" />
+          <Text style={styles.errorText}>{error}</Text>
+          <TouchableOpacity style={styles.retryBtn} onPress={() => setRetryToken(t => t + 1)}>
+            <Text style={styles.retryText}>Повторить</Text>
+          </TouchableOpacity>
+        </View>
       ) : (
         <FlatList
           data={pagedCast}
@@ -226,13 +299,14 @@ export default function ActorScreen({ route, navigation }: any) {
             />
           }
           renderItem={({ item }) => (
-            <TouchableOpacity style={styles.card} onPress={() => openCard(item)}>
+            <TouchableOpacity style={[styles.card, { width: cardWidth }]} onPress={() => openCard(item)}>
               <View style={styles.typeBadge}>
                 <Text style={styles.typeBadgeText}>{item.media_type === 'tv' ? 'Сериал' : 'Фильм'}</Text>
               </View>
+              <CardMark id={item.id} mediaType={item.media_type} />
               <Image
                 source={{ uri: `https://image.tmdb.org/t/p/w300${item.poster_path}` }}
-                style={styles.poster}
+                style={[styles.poster, { width: cardWidth, height: cardWidth * 1.5 }]}
                 contentFit="cover"
                 transition={200}
                 cachePolicy="memory-disk"
@@ -278,13 +352,17 @@ const styles = StyleSheet.create({
   chipSortTextActive: { color: '#8888ff', fontWeight: '600' },
   grid: { paddingHorizontal: 12, paddingBottom: 32 },
   row: { justifyContent: 'space-between', marginBottom: 12 },
-  card: { width: cardWidth },
+  card: {},
   typeBadge: { position: 'absolute', top: 8, left: 8, backgroundColor: '#1a1a40', borderRadius: 10, paddingHorizontal: 8, paddingVertical: 3, zIndex: 1 },
   typeBadgeText: { color: '#8888ff', fontSize: 11, fontWeight: '600' },
-  poster: { width: cardWidth, height: cardWidth * 1.5, borderRadius: 10, marginBottom: 6 },
+  poster: { borderRadius: 10, marginBottom: 6 },
   cardTitle: { color: '#fff', fontSize: 12, fontWeight: '600', marginBottom: 2 },
   cardRating: { color: '#aaa', fontSize: 11 },
-  cardYear: { color: '#555', fontSize: 11 },
+  cardYear: { color: '#888', fontSize: 11 },
   empty: { alignItems: 'center', paddingTop: 40 },
-  emptyText: { color: '#555', fontSize: 14 },
+  emptyText: { color: '#888', fontSize: 14 },
+  errorBox: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 12, paddingHorizontal: 24 },
+  errorText: { color: '#aaa', fontSize: 14, textAlign: 'center' },
+  retryBtn: { backgroundColor: '#e50914', paddingHorizontal: 24, paddingVertical: 10, borderRadius: 20, marginTop: 6 },
+  retryText: { color: '#fff', fontWeight: '700', fontSize: 14 },
 });

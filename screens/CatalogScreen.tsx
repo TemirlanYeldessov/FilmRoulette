@@ -1,10 +1,10 @@
 import { Ionicons } from '@expo/vector-icons';
 import { Image } from 'expo-image';
 import { LinearGradient } from 'expo-linear-gradient';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
-  Dimensions,
+  Alert,
   FlatList,
   Modal,
   RefreshControl,
@@ -13,15 +13,15 @@ import {
   Text,
   TextInput,
   TouchableOpacity,
+  useWindowDimensions,
   View,
 } from 'react-native';
 import PaginationBar from '../components/PaginationBar';
+import CardMark from '../components/CardMark';
+import { getCached, setCached, LIST_TTL } from '../utils/apiCache';
 import { HorizontalCardSkeleton, MovieCardSkeleton } from '../components/Skeleton';
 import { useAppContext } from '../store/AppContext';
 import { TMDB_TOKEN as TOKEN } from '../constants/api';
-
-const { width } = Dimensions.get('window');
-const cardWidth = (width - 48) / 2;
 
 const MOVIE_GENRES = [
   { id: 0, name: 'Все жанры' },
@@ -117,7 +117,7 @@ const TRENDING_PAGE_CAP = 10;
 
 const defaultFilters = {
   mediaType: 'all',
-  genreId: 0,
+  genreIds: [] as number[],
   yearFrom: '',
   yearTo: '',
   minRating: 0,
@@ -127,18 +127,57 @@ const defaultFilters = {
   sortBy: 'popularity.desc',
 };
 
+// Multi-select genre toggle, mirroring the roulette's behaviour so genre
+// selection works the same way everywhere. id 0 ("Все жанры") clears the set.
+function toggleGenreId(filters: any, id: number) {
+  if (id === 0) return { ...filters, genreIds: [] };
+  const cur: number[] = filters.genreIds || [];
+  const next = cur.includes(id) ? cur.filter(g => g !== id) : [...cur, id];
+  return { ...filters, genreIds: next };
+}
+
+const defaultPreciseFilters = { yearFrom: '', yearTo: '', minRating: 0, maxRating: 10, country: '' };
+const RANDOM_REUSE_NOTICE = 'Все свежие варианты уже видели — показываю повтор.';
+
+function assertValidTmdbPayload(data: any) {
+  if (data?.success === false || data?.status_code) {
+    throw new Error(data.status_message || 'TMDB error');
+  }
+  return data;
+}
+
+function withCheckedJson(res: Response) {
+  const json = res.json.bind(res);
+  (res as any).json = async () => assertValidTmdbPayload(await json());
+  return res;
+}
+
+function areFiltersEqual(a: any, b: any) {
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
 async function fetchWithTimeout(url: string, options: any = {}, timeout = 10000) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeout);
+  const externalSignal: AbortSignal | undefined = options.signal;
+  const onExternalAbort = () => controller.abort();
+  if (externalSignal) {
+    if (externalSignal.aborted) controller.abort();
+    else externalSignal.addEventListener('abort', onExternalAbort);
+  }
   try {
     const res = await fetch(url, { ...options, signal: controller.signal });
-    clearTimeout(timer);
     if (!res.ok) throw new Error('TMDB временно не отвечает. Попробуй еще раз.');
-    return res;
+    return withCheckedJson(res);
   } catch (e: any) {
-    clearTimeout(timer);
-    if (e.name === 'AbortError') throw new Error('Превышено время ожидания.');
+    if (e.name === 'AbortError') {
+      if (externalSignal?.aborted) throw e;
+      throw new Error('Превышено время ожидания.');
+    }
     throw e;
+  } finally {
+    clearTimeout(timer);
+    if (externalSignal) externalSignal.removeEventListener('abort', onExternalAbort);
   }
 }
 
@@ -192,23 +231,24 @@ async function getTrailer(id: number, type: string) {
 
 async function fetchDetails(id: number, type: string) {
   const [ruRes, enRes] = await Promise.all([
-    fetchWithTimeout(`https://api.themoviedb.org/3/${type}/${id}?language=ru-RU`, {
+    fetchWithTimeout(`https://api.themoviedb.org/3/${type}/${id}?language=ru-RU&append_to_response=videos`, {
       headers: { Authorization: `Bearer ${TOKEN}` },
     }),
-    fetchWithTimeout(`https://api.themoviedb.org/3/${type}/${id}?language=en-US`, {
+    fetchWithTimeout(`https://api.themoviedb.org/3/${type}/${id}?language=en-US&append_to_response=videos`, {
       headers: { Authorization: `Bearer ${TOKEN}` },
     }),
   ]);
   const ruData = await ruRes.json();
   const enData = await enRes.json();
-  const trailerKey = await getTrailer(id, type);
+  const trailerRu = ruData.videos?.results?.find((v: any) => v.type === 'Trailer' && v.site === 'YouTube');
+  const trailerEn = enData.videos?.results?.find((v: any) => v.type === 'Trailer' && v.site === 'YouTube');
   return {
     id,
     titleRu: ruData.title || ruData.name,
     titleEn: enData.title || enData.name,
     overview: ruData.overview || enData.overview,
     poster: ruData.poster_path ? `https://image.tmdb.org/t/p/w500${ruData.poster_path}` : null,
-    trailerKey,
+    trailerKey: trailerRu?.key || trailerEn?.key || null,
     mediaType: type,
     rating: ruData.vote_average ? ruData.vote_average.toFixed(1) : null,
     year: (ruData.release_date || ruData.first_air_date || '').slice(0, 4),
@@ -243,13 +283,19 @@ async function fetchRandom(
     const url = `https://api.themoviedb.org/3/discover/${type}?${new URLSearchParams(params)}`;
     const res = await fetchWithTimeout(url, { headers: { Authorization: `Bearer ${TOKEN}` } });
     const data = await res.json();
-    const items = (data.results || []).filter(
-      (m: any) => m.poster_path && !recentRandomIds.includes(`${type}-${m.id}`)
-    );
+    const posterItems = (data.results || []).filter((m: any) => m.poster_path);
+    const freshItems = posterItems.filter((m: any) => !recentRandomIds.includes(`${type}-${m.id}`));
+    const items = freshItems.length > 0 ? freshItems : (attempt >= 3 ? posterItems : []);
     if (items.length > 0) {
       const item = items[Math.floor(Math.random() * items.length)];
       const details = await fetchDetails(item.id, type);
-      return { ...details, genreId: genres[0] ?? 0, selectedGenres: genres };
+      return {
+        ...details,
+        genreId: genres[0] ?? 0,
+        selectedGenres: genres,
+        preciseFilters: filters,
+        randomNotice: freshItems.length === 0 ? RANDOM_REUSE_NOTICE : null,
+      };
     }
   }
   throw new Error('Новых вариантов по этим условиям не осталось. Попробуй изменить фильтры.');
@@ -298,7 +344,7 @@ async function discoverItems(filters: any, adultContent: boolean, page = 1) {
       page: String(page),
       include_adult: String(adultContent),
     };
-    if (filters.genreId) params.with_genres = String(filters.genreId);
+    if (filters.genreIds?.length) params.with_genres = filters.genreIds.join(',');
     if (filters.minRating > 0) params['vote_average.gte'] = String(filters.minRating);
     if (filters.maxRating < 10) params['vote_average.lte'] = String(filters.maxRating);
     if (filters.language) params.with_original_language = filters.language;
@@ -332,11 +378,25 @@ function FilterSheet({ visible, onClose, filters, onApply }: any) {
   const [local, setLocal] = useState(filters);
   const genres = local.mediaType === 'tv' ? TV_GENRES : MOVIE_GENRES;
 
-  useEffect(() => { setLocal(filters); }, [filters]);
+  useEffect(() => {
+    if (visible) setLocal(filters);
+  }, [visible, filters]);
+
+  const requestClose = () => {
+    if (areFiltersEqual(local, filters)) {
+      onClose();
+      return;
+    }
+    Alert.alert('Есть несохранённые изменения', 'Применить изменения фильтров?', [
+      { text: 'Отмена', style: 'cancel' },
+      { text: 'Не применять', style: 'destructive', onPress: () => { setLocal(filters); onClose(); } },
+      { text: 'Применить', onPress: () => { onApply(local); onClose(); } },
+    ]);
+  };
 
   return (
-    <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
-      <TouchableOpacity style={fStyles.overlay} activeOpacity={1} onPress={onClose}>
+    <Modal visible={visible} transparent animationType="slide" onRequestClose={requestClose}>
+      <TouchableOpacity style={fStyles.overlay} activeOpacity={1} onPress={requestClose}>
         <TouchableOpacity activeOpacity={1} style={fStyles.sheet}>
           <View style={fStyles.handle} />
           <Text style={fStyles.title}>Фильтры</Text>
@@ -348,7 +408,7 @@ function FilterSheet({ visible, onClose, filters, onApply }: any) {
                   <TouchableOpacity
                     key={t.key}
                     style={[fStyles.chip, local.mediaType === t.key && fStyles.chipActive]}
-                    onPress={() => setLocal({ ...local, mediaType: t.key, genreId: 0 })}
+                    onPress={() => setLocal({ ...local, mediaType: t.key, genreIds: [] })}
                   >
                     <Text style={[fStyles.chipText, local.mediaType === t.key && fStyles.chipTextActive]}>{t.name}</Text>
                   </TouchableOpacity>
@@ -359,15 +419,18 @@ function FilterSheet({ visible, onClose, filters, onApply }: any) {
             <Text style={fStyles.label}>Жанр</Text>
             <ScrollView horizontal showsHorizontalScrollIndicator={false}>
               <View style={fStyles.chipRow}>
-                {genres.map(g => (
-                  <TouchableOpacity
-                    key={g.id}
-                    style={[fStyles.chip, local.genreId === g.id && fStyles.chipActive]}
-                    onPress={() => setLocal({ ...local, genreId: g.id })}
-                  >
-                    <Text style={[fStyles.chipText, local.genreId === g.id && fStyles.chipTextActive]}>{g.name}</Text>
-                  </TouchableOpacity>
-                ))}
+                {genres.map(g => {
+                  const active = g.id === 0 ? local.genreIds.length === 0 : local.genreIds.includes(g.id);
+                  return (
+                    <TouchableOpacity
+                      key={g.id}
+                      style={[fStyles.chip, active && fStyles.chipActive]}
+                      onPress={() => setLocal((p: any) => toggleGenreId(p, g.id))}
+                    >
+                      <Text style={[fStyles.chipText, active && fStyles.chipTextActive]}>{g.name}</Text>
+                    </TouchableOpacity>
+                  );
+                })}
               </View>
             </ScrollView>
 
@@ -455,16 +518,19 @@ export default function CatalogScreen({ navigation }: any) {
   // Trending
   const [trending, setTrending] = useState<any[]>([]);
   const [trendingLoading, setTrendingLoading] = useState(true);
+  const [trendingError, setTrendingError] = useState('');
   const [trendingPage, setTrendingPage] = useState(1);
   const [trendingTotal, setTrendingTotal] = useState(1);
   const [trendingLoadingMore, setTrendingLoadingMore] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const trendingReqRef = useRef(0);
 
   // Random
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [selectedGenres, setSelectedGenres] = useState<number[]>([0]);
-  const [preciseFilters, setPreciseFilters] = useState({ yearFrom: '', yearTo: '', minRating: 0, maxRating: 10, country: '' });
+  const [preciseFilters, setPreciseFilters] = useState(defaultPreciseFilters);
+  const [localPreciseFilters, setLocalPreciseFilters] = useState(defaultPreciseFilters);
   const [showPreciseFilters, setShowPreciseFilters] = useState(false);
 
   // Filters modal
@@ -485,28 +551,80 @@ export default function CatalogScreen({ navigation }: any) {
   const activeFiltersRef = useRef(defaultFilters);
   const resultsListRef = useRef<FlatList>(null);
   const genres = mediaType === 'tv' ? TV_GENRES : MOVIE_GENRES;
+  const { width } = useWindowDimensions();
+  const cardWidth = useMemo(() => (width - 48) / 2, [width]);
+
+  const scrollResultsToTop = useCallback(() => {
+    requestAnimationFrame(() => {
+      resultsListRef.current?.scrollToOffset({ offset: 0, animated: false });
+    });
+  }, []);
+
+  const openPreciseFilters = () => {
+    setLocalPreciseFilters(preciseFilters);
+    setShowPreciseFilters(true);
+  };
+
+  const applyPreciseFilters = (next = localPreciseFilters) => {
+    setPreciseFilters(next);
+    setShowPreciseFilters(false);
+  };
+
+  const closePreciseFilters = () => {
+    if (areFiltersEqual(localPreciseFilters, preciseFilters)) {
+      setShowPreciseFilters(false);
+      return;
+    }
+    Alert.alert('Есть несохранённые изменения', 'Применить изменения фильтров?', [
+      { text: 'Отмена', style: 'cancel' },
+      { text: 'Не применять', style: 'destructive', onPress: () => setShowPreciseFilters(false) },
+      { text: 'Применить', onPress: () => applyPreciseFilters() },
+    ]);
+  };
 
   const loadTrending = useCallback(async (mt: string, page: number, append: boolean) => {
-    if (page === 1) setTrendingLoading(true);
-    else setTrendingLoadingMore(true);
-    try {
-      const res = await fetchWithTimeout(
-        `https://api.themoviedb.org/3/trending/${mt}/week?language=ru-RU&page=${page}`,
-        { headers: { Authorization: `Bearer ${TOKEN}` } }
-      );
-      const data = await res.json();
-      const results = (data.results || []).filter((m: any) => m.poster_path);
-      setTrending(prev => append ? dedup([...prev, ...results]) : results);
-      setTrendingTotal(Math.min(data.total_pages || 1, TRENDING_PAGE_CAP));
-      setTrendingPage(page);
-    } catch (e) {
-      console.error(e);
+    const myId = ++trendingReqRef.current;
+    if (page === 1) {
+      setTrendingLoading(true);
+      setTrendingError('');
+    } else {
+      setTrendingLoadingMore(true);
     }
-    setTrendingLoading(false);
-    setTrendingLoadingMore(false);
+    try {
+      const cacheKey = `trend:${mt}:${page}`;
+      let payload = getCached<{ results: any[]; totalPages: number }>(cacheKey, LIST_TTL);
+      if (!payload) {
+        const res = await fetchWithTimeout(
+          `https://api.themoviedb.org/3/trending/${mt}/week?language=ru-RU&page=${page}`,
+          { headers: { Authorization: `Bearer ${TOKEN}` } }
+        );
+        const data = await res.json();
+        payload = {
+          results: (data.results || []).filter((m: any) => m.poster_path),
+          totalPages: Math.min(data.total_pages || 1, TRENDING_PAGE_CAP),
+        };
+        setCached(cacheKey, payload);
+      }
+      if (trendingReqRef.current !== myId) return;
+      const results = payload.results;
+      setTrending(prev => append ? dedup([...prev, ...results]) : results);
+      setTrendingTotal(payload.totalPages);
+      setTrendingPage(page);
+    } catch (e: any) {
+      if (trendingReqRef.current !== myId) return;
+      if (page === 1) setTrendingError(e?.message || 'Не удалось загрузить новинки.');
+    } finally {
+      if (trendingReqRef.current === myId) {
+        setTrendingLoading(false);
+        setTrendingLoadingMore(false);
+      }
+    }
   }, []);
 
   useEffect(() => {
+    // Bump request id immediately so any in-flight onRefresh / loadMore for
+    // the previous mediaType can't write into trending state for the new one.
+    ++trendingReqRef.current;
     setTrendingLoading(true);
     setTrendingPage(1);
     setTrending([]);
@@ -580,8 +698,18 @@ export default function CatalogScreen({ navigation }: any) {
     setTotalResults(0);
   };
 
-  const handleFilterSearch = async (f: any) => {
-    searchRequestRef.current += 1;
+  const handleFilterSearch = async (rawF: any) => {
+    // Auto-correct contradictory ranges so the user gets actual results
+    // instead of a confusing empty state.
+    const f = { ...rawF };
+    if (f.minRating > f.maxRating) f.maxRating = 10;
+    const yf = parseInt(f.yearFrom, 10);
+    const yt = parseInt(f.yearTo, 10);
+    if (Number.isFinite(yf) && Number.isFinite(yt) && yf > yt) {
+      f.yearFrom = String(yt);
+      f.yearTo = String(yf);
+    }
+    const requestId = ++searchRequestRef.current;
     lastQueryRef.current = '';
     activeFiltersRef.current = f;
     setFilters(f);
@@ -592,39 +720,48 @@ export default function CatalogScreen({ navigation }: any) {
     setCurrentPage(1);
     try {
       const { results, totalPages: tp, totalResults: tr } = await discoverItems(f, adultContent, 1);
+      if (searchRequestRef.current !== requestId) return;
       setSearchResults(results);
       setTotalPages(tp);
       setTotalResults(tr);
     } catch (e: any) {
+      if (searchRequestRef.current !== requestId) return;
       setError(e.message || 'Не удалось применить фильтры.');
       setSearchResults([]);
       setTotalPages(1);
       setTotalResults(0);
+    } finally {
+      if (searchRequestRef.current === requestId) setSearching(false);
     }
-    setSearching(false);
   };
 
   const handlePageChange = async (page: number) => {
     if (searching) return;
+    const requestId = ++searchRequestRef.current;
+    const prevPage = currentPage;
+    let shouldScroll = false;
     setCurrentPage(page);
     setSearching(true);
-    resultsListRef.current?.scrollToOffset({ offset: 0, animated: false });
+    setError('');
     try {
-      if (lastQueryRef.current) {
-        const { results, totalPages: tp, totalResults: tr } = await searchItems(lastQueryRef.current, adultContent, page);
-        setSearchResults(results);
-        setTotalPages(tp);
-        setTotalResults(tr);
-      } else {
-        const { results, totalPages: tp, totalResults: tr } = await discoverItems(activeFiltersRef.current, adultContent, page);
-        setSearchResults(results);
-        setTotalPages(tp);
-        setTotalResults(tr);
+      const { results, totalPages: tp, totalResults: tr } = lastQueryRef.current
+        ? await searchItems(lastQueryRef.current, adultContent, page)
+        : await discoverItems(activeFiltersRef.current, adultContent, page);
+      if (searchRequestRef.current !== requestId) return;
+      setSearchResults(results);
+      setTotalPages(tp);
+      setTotalResults(tr);
+      shouldScroll = true;
+    } catch (e: any) {
+      if (searchRequestRef.current !== requestId) return;
+      setCurrentPage(prevPage);
+      setError(e?.message || 'Не удалось перейти на страницу.');
+    } finally {
+      if (searchRequestRef.current === requestId) {
+        setSearching(false);
+        if (shouldScroll) scrollResultsToTop();
       }
-    } catch {
-      // silent — keep current results
     }
-    setSearching(false);
   };
 
   const openCard = (item: any) => {
@@ -632,12 +769,20 @@ export default function CatalogScreen({ navigation }: any) {
   };
 
   const openRandom = async () => {
+    const fp = { ...preciseFilters };
+    if (fp.minRating > fp.maxRating) fp.maxRating = 10;
+    const yf = parseInt(fp.yearFrom, 10);
+    const yt = parseInt(fp.yearTo, 10);
+    if (Number.isFinite(yf) && Number.isFinite(yt) && yf > yt) {
+      fp.yearFrom = String(yt);
+      fp.yearTo = String(yf);
+    }
     setLoading(true);
     setError('');
     try {
-      const movie = await fetchRandom(selectedGenres, mediaType, adultContent, preciseFilters, recentRandomIds);
+      const movie = await fetchRandom(selectedGenres, mediaType, adultContent, fp, recentRandomIds);
       addRecentRandom(movie.id, movie.mediaType);
-      navigation.navigate('Card', { movie });
+      navigation.navigate('Card', { movie, preciseFilters: fp, randomNotice: movie.randomNotice });
     } catch (e: any) {
       setError(e.message || 'Не удалось подобрать случайный тайтл.');
     }
@@ -744,13 +889,14 @@ export default function CatalogScreen({ navigation }: any) {
               contentContainerStyle={styles.grid}
               columnWrapperStyle={styles.row}
               renderItem={({ item }) => (
-                <TouchableOpacity style={styles.card} onPress={() => openCard(item)}>
+                <TouchableOpacity style={[styles.card, { width: cardWidth }]} onPress={() => openCard(item)}>
                   <View style={styles.typeBadge}>
                     <Text style={styles.typeBadgeText}>{item.media_type === 'tv' ? 'Сериал' : 'Фильм'}</Text>
                   </View>
+                  <CardMark id={item.id} mediaType={item.media_type || mediaType} />
                   <Image
                     source={{ uri: `https://image.tmdb.org/t/p/w300${item.poster_path}` }}
-                    style={styles.poster}
+                    style={[styles.poster, { width: cardWidth, height: cardWidth * 1.5 }]}
                     contentFit="cover"
                     transition={200}
                     cachePolicy="memory-disk"
@@ -776,47 +922,8 @@ export default function CatalogScreen({ navigation }: any) {
           contentContainerStyle={styles.scroll}
           refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#e50914" />}
         >
-          <Text style={styles.sectionTitle}>Новинки недели</Text>
-
-          {trendingLoading ? (
-            <FlatList
-              data={[1, 2, 3, 4, 5]}
-              horizontal
-              showsHorizontalScrollIndicator={false}
-              keyExtractor={i => String(i)}
-              renderItem={() => <HorizontalCardSkeleton />}
-            />
-          ) : (
-            <FlatList
-              data={trending}
-              horizontal
-              showsHorizontalScrollIndicator={false}
-              keyExtractor={item => `${item.id}`}
-              onEndReached={loadMoreTrending}
-              onEndReachedThreshold={0.6}
-              renderItem={({ item }) => (
-                <TouchableOpacity onPress={() => openCard(item)} style={styles.trendCard}>
-                  <Image
-                    source={{ uri: `https://image.tmdb.org/t/p/w300${item.poster_path}` }}
-                    style={styles.trendImage}
-                    contentFit="cover"
-                    transition={200}
-                    cachePolicy="memory-disk"
-                  />
-                  <Text style={styles.trendTitle} numberOfLines={2}>{item.title || item.name}</Text>
-                </TouchableOpacity>
-              )}
-              ListFooterComponent={
-                trendingLoadingMore ? (
-                  <View style={styles.trendCard}>
-                    <HorizontalCardSkeleton />
-                  </View>
-                ) : null
-              }
-            />
-          )}
-
-          <Text style={styles.sectionTitle}>Случайный {mediaType === 'movie' ? 'фильм' : 'сериал'}</Text>
+          <Text style={styles.sectionTitle}>Рулетка</Text>
+          <Text style={styles.sectionSubtitle}>Выбери жанры и крути — подберём случайный тайтл</Text>
 
           <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 12 }}>
             <View style={styles.genreRow}>
@@ -842,12 +949,12 @@ export default function CatalogScreen({ navigation }: any) {
             </View>
           </ScrollView>
 
-          <TouchableOpacity style={styles.preciseRow} onPress={() => setShowPreciseFilters(true)}>
+          <TouchableOpacity style={styles.preciseRow} onPress={openPreciseFilters}>
             <View>
               <Text style={styles.preciseTitle}>Подобрать точнее</Text>
-              <Text style={styles.preciseSubtitle}>Год, рейтинг, страна</Text>
+              <Text style={styles.preciseSubtitle}>Год, рейтинг, страна — для рулетки</Text>
             </View>
-            <Ionicons name="chevron-forward" size={18} color="#555" />
+            <Ionicons name="chevron-forward" size={18} color="#888" />
           </TouchableOpacity>
 
           {error ? (
@@ -864,30 +971,76 @@ export default function CatalogScreen({ navigation }: any) {
               <Text style={styles.randomText}>Случайный {mediaType === 'movie' ? 'фильм' : 'сериал'}</Text>
             </TouchableOpacity>
           )}
+
+          <Text style={[styles.sectionTitle, { marginTop: 28 }]}>Новинки недели</Text>
+
+          {trendingLoading ? (
+            <FlatList
+              data={[1, 2, 3, 4, 5]}
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              keyExtractor={i => String(i)}
+              renderItem={() => <HorizontalCardSkeleton />}
+            />
+          ) : trendingError ? (
+            <View style={styles.trendingErrorBox}>
+              <Text style={styles.trendingErrorText}>{trendingError}</Text>
+              <TouchableOpacity onPress={() => loadTrending(mediaType, 1, false)}>
+                <Text style={styles.trendingRetry}>Повторить</Text>
+              </TouchableOpacity>
+            </View>
+          ) : (
+            <FlatList
+              data={trending}
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              keyExtractor={item => `${item.id}`}
+              onEndReached={loadMoreTrending}
+              onEndReachedThreshold={0.6}
+              renderItem={({ item }) => (
+                <TouchableOpacity onPress={() => openCard(item)} style={styles.trendCard}>
+                  <CardMark id={item.id} mediaType={item.media_type || mediaType} />
+                  <Image
+                    source={{ uri: `https://image.tmdb.org/t/p/w300${item.poster_path}` }}
+                    style={styles.trendImage}
+                    contentFit="cover"
+                    transition={200}
+                    cachePolicy="memory-disk"
+                  />
+                  <Text style={styles.trendTitle} numberOfLines={2}>{item.title || item.name}</Text>
+                </TouchableOpacity>
+              )}
+              ListFooterComponent={
+                trendingLoadingMore ? (
+                  <HorizontalCardSkeleton />
+                ) : null
+              }
+            />
+          )}
         </ScrollView>
       )}
 
       <FilterSheet visible={showFilters} onClose={() => setShowFilters(false)} filters={filters} onApply={handleFilterSearch} />
 
-      <Modal visible={showPreciseFilters} transparent animationType="slide" onRequestClose={() => setShowPreciseFilters(false)}>
-        <TouchableOpacity style={fStyles.overlay} activeOpacity={1} onPress={() => setShowPreciseFilters(false)}>
+      <Modal visible={showPreciseFilters} transparent animationType="slide" onRequestClose={closePreciseFilters}>
+        <TouchableOpacity style={fStyles.overlay} activeOpacity={1} onPress={closePreciseFilters}>
           <TouchableOpacity activeOpacity={1} style={fStyles.sheet}>
             <View style={fStyles.handle} />
             <Text style={fStyles.title}>Подобрать точнее</Text>
             <ScrollView showsVerticalScrollIndicator={false}>
               <Text style={fStyles.label}>Год выпуска</Text>
               <View style={fStyles.yearRow}>
-                <TextInput style={fStyles.yearInput} placeholder="От" placeholderTextColor="#555" value={preciseFilters.yearFrom} onChangeText={v => setPreciseFilters(p => ({ ...p, yearFrom: v }))} keyboardType="numeric" maxLength={4} />
+                <TextInput style={fStyles.yearInput} placeholder="От" placeholderTextColor="#555" value={localPreciseFilters.yearFrom} onChangeText={v => setLocalPreciseFilters(p => ({ ...p, yearFrom: v }))} keyboardType="numeric" maxLength={4} />
                 <Text style={fStyles.yearDash}>-</Text>
-                <TextInput style={fStyles.yearInput} placeholder="До" placeholderTextColor="#555" value={preciseFilters.yearTo} onChangeText={v => setPreciseFilters(p => ({ ...p, yearTo: v }))} keyboardType="numeric" maxLength={4} />
+                <TextInput style={fStyles.yearInput} placeholder="До" placeholderTextColor="#555" value={localPreciseFilters.yearTo} onChangeText={v => setLocalPreciseFilters(p => ({ ...p, yearTo: v }))} keyboardType="numeric" maxLength={4} />
               </View>
 
               <Text style={fStyles.label}>Минимальный рейтинг</Text>
               <ScrollView horizontal showsHorizontalScrollIndicator={false}>
                 <View style={fStyles.chipRow}>
                   {RATINGS.map(r => (
-                    <TouchableOpacity key={r} style={[fStyles.chip, preciseFilters.minRating === r && fStyles.chipActive]} onPress={() => setPreciseFilters(p => ({ ...p, minRating: r }))}>
-                      <Text style={[fStyles.chipText, preciseFilters.minRating === r && fStyles.chipTextActive]}>{r === 0 ? 'Любой' : `${r}+`}</Text>
+                    <TouchableOpacity key={r} style={[fStyles.chip, localPreciseFilters.minRating === r && fStyles.chipActive]} onPress={() => setLocalPreciseFilters(p => ({ ...p, minRating: r }))}>
+                      <Text style={[fStyles.chipText, localPreciseFilters.minRating === r && fStyles.chipTextActive]}>{r === 0 ? 'Любой' : `${r}+`}</Text>
                     </TouchableOpacity>
                   ))}
                 </View>
@@ -897,8 +1050,8 @@ export default function CatalogScreen({ navigation }: any) {
               <ScrollView horizontal showsHorizontalScrollIndicator={false}>
                 <View style={fStyles.chipRow}>
                   {MAX_RATINGS.map(r => (
-                    <TouchableOpacity key={r} style={[fStyles.chip, preciseFilters.maxRating === r && fStyles.chipActive]} onPress={() => setPreciseFilters(p => ({ ...p, maxRating: r }))}>
-                      <Text style={[fStyles.chipText, preciseFilters.maxRating === r && fStyles.chipTextActive]}>{r === 10 ? 'Любой' : `до ${r}`}</Text>
+                    <TouchableOpacity key={r} style={[fStyles.chip, localPreciseFilters.maxRating === r && fStyles.chipActive]} onPress={() => setLocalPreciseFilters(p => ({ ...p, maxRating: r }))}>
+                      <Text style={[fStyles.chipText, localPreciseFilters.maxRating === r && fStyles.chipTextActive]}>{r === 10 ? 'Любой' : `до ${r}`}</Text>
                     </TouchableOpacity>
                   ))}
                 </View>
@@ -908,18 +1061,18 @@ export default function CatalogScreen({ navigation }: any) {
               <ScrollView horizontal showsHorizontalScrollIndicator={false}>
                 <View style={fStyles.chipRow}>
                   {COUNTRIES.map(c => (
-                    <TouchableOpacity key={c.code} style={[fStyles.chip, preciseFilters.country === c.code && fStyles.chipActive]} onPress={() => setPreciseFilters(p => ({ ...p, country: c.code }))}>
-                      <Text style={[fStyles.chipText, preciseFilters.country === c.code && fStyles.chipTextActive]}>{c.name}</Text>
+                    <TouchableOpacity key={c.code} style={[fStyles.chip, localPreciseFilters.country === c.code && fStyles.chipActive]} onPress={() => setLocalPreciseFilters(p => ({ ...p, country: c.code }))}>
+                      <Text style={[fStyles.chipText, localPreciseFilters.country === c.code && fStyles.chipTextActive]}>{c.name}</Text>
                     </TouchableOpacity>
                   ))}
                 </View>
               </ScrollView>
 
               <View style={fStyles.buttons}>
-                <TouchableOpacity style={fStyles.resetBtn} onPress={() => setPreciseFilters({ yearFrom: '', yearTo: '', minRating: 0, maxRating: 10, country: '' })}>
+                <TouchableOpacity style={fStyles.resetBtn} onPress={() => setLocalPreciseFilters(defaultPreciseFilters)}>
                   <Text style={fStyles.resetText}>Сбросить</Text>
                 </TouchableOpacity>
-                <TouchableOpacity style={fStyles.applyBtn} onPress={() => setShowPreciseFilters(false)}>
+                <TouchableOpacity style={fStyles.applyBtn} onPress={() => applyPreciseFilters()}>
                   <Text style={fStyles.applyText}>Применить</Text>
                 </TouchableOpacity>
               </View>
@@ -950,6 +1103,7 @@ const styles = StyleSheet.create({
   resultsTitle: { color: '#fff', fontSize: 18, fontWeight: '700' },
   scroll: { padding: 16 },
   sectionTitle: { fontSize: 18, fontWeight: '700', color: '#fff', marginBottom: 12, marginTop: 8 },
+  sectionSubtitle: { color: '#888', fontSize: 13, marginTop: -6, marginBottom: 14 },
   trendCard: { width: 120, marginRight: 10 },
   trendImage: { width: 120, height: 180, borderRadius: 10, marginBottom: 6 },
   trendTitle: { color: '#ccc', fontSize: 11, textAlign: 'center' },
@@ -967,15 +1121,18 @@ const styles = StyleSheet.create({
   randomText: { color: '#fff', fontWeight: '700', fontSize: 16 },
   grid: { padding: 12 },
   row: { justifyContent: 'space-between', marginBottom: 12 },
-  card: { width: cardWidth },
+  card: {},
   typeBadge: { position: 'absolute', top: 8, left: 8, backgroundColor: '#1a1a40', borderRadius: 10, paddingHorizontal: 8, paddingVertical: 3, zIndex: 1 },
   typeBadgeText: { color: '#8888ff', fontSize: 11, fontWeight: '600' },
-  poster: { width: cardWidth, height: cardWidth * 1.5, borderRadius: 10, marginBottom: 6 },
+  poster: { borderRadius: 10, marginBottom: 6 },
   cardTitle: { color: '#fff', fontSize: 12, fontWeight: '600', marginBottom: 3 },
   cardRating: { color: '#aaa', fontSize: 11 },
   empty: { flex: 1, alignItems: 'center', paddingTop: 80, paddingHorizontal: 24 },
   emptyText: { color: '#aaa', fontSize: 16, textAlign: 'center', marginTop: 10 },
   emptyHint: { color: '#555', fontSize: 13, textAlign: 'center', marginTop: 6 },
+  trendingErrorBox: { backgroundColor: '#2a0a0a', borderRadius: 12, padding: 14, marginBottom: 8, alignItems: 'center', gap: 8 },
+  trendingErrorText: { color: '#e50914', fontSize: 13, textAlign: 'center' },
+  trendingRetry: { color: '#fff', fontSize: 13, fontWeight: '700' },
 });
 
 const fStyles = StyleSheet.create({

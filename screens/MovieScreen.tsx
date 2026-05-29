@@ -1,10 +1,10 @@
 import { Ionicons } from '@expo/vector-icons';
 import { Image } from 'expo-image';
 import { LinearGradient } from 'expo-linear-gradient';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
-  Dimensions,
+  Alert,
   FlatList,
   Linking,
   Modal,
@@ -13,6 +13,7 @@ import {
   StyleSheet,
   Text,
   TouchableOpacity,
+  useWindowDimensions,
   View,
 } from 'react-native';
 import YoutubePlayer from 'react-native-youtube-iframe';
@@ -20,8 +21,9 @@ import { MovieDetailSkeleton } from '../components/Skeleton';
 import { useAppContext, UserMovieStatus } from '../store/AppContext';
 import { TMDB_TOKEN as TOKEN } from '../constants/api';
 
-const { width } = Dimensions.get('window');
 const relatedPosterWidth = 104;
+const defaultPreciseFilters = { yearFrom: '', yearTo: '', minRating: 0, maxRating: 10, country: '' };
+const RANDOM_REUSE_NOTICE = 'Все свежие варианты уже видели — показываю повтор.';
 
 const ONLINE_SOURCES = [
   {
@@ -52,18 +54,41 @@ const STATUS_OPTIONS: { key: UserMovieStatus; label: string; icon: any }[] = [
   { key: 'disliked', label: 'Не понравилось', icon: 'thumbs-down-outline' },
 ];
 
+function assertValidTmdbPayload(data: any) {
+  if (data?.success === false || data?.status_code) {
+    throw new Error(data.status_message || 'TMDB error');
+  }
+  return data;
+}
+
+function withCheckedJson(res: Response) {
+  const json = res.json.bind(res);
+  (res as any).json = async () => assertValidTmdbPayload(await json());
+  return res;
+}
+
 async function fetchWithTimeout(url: string, options: any = {}, timeout = 10000) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeout);
+  const externalSignal: AbortSignal | undefined = options.signal;
+  const onExternalAbort = () => controller.abort();
+  if (externalSignal) {
+    if (externalSignal.aborted) controller.abort();
+    else externalSignal.addEventListener('abort', onExternalAbort);
+  }
   try {
     const res = await fetch(url, { ...options, signal: controller.signal });
-    clearTimeout(timer);
     if (!res.ok) throw new Error('TMDB временно не отвечает. Попробуй еще раз.');
-    return res;
+    return withCheckedJson(res);
   } catch (e: any) {
-    clearTimeout(timer);
-    if (e.name === 'AbortError') throw new Error('Превышено время ожидания. Проверь интернет.');
+    if (e.name === 'AbortError') {
+      if (externalSignal?.aborted) throw e;
+      throw new Error('Превышено время ожидания. Проверь интернет.');
+    }
     throw e;
+  } finally {
+    clearTimeout(timer);
+    if (externalSignal) externalSignal.removeEventListener('abort', onExternalAbort);
   }
 }
 
@@ -122,21 +147,22 @@ function normalizeRelated(items: any[], type: string) {
     .map((m: any) => ({ ...m, media_type: m.media_type || type }));
 }
 
-async function fetchFullDetails(id: number, type: string) {
+async function fetchFullDetails(id: number, type: string, signal?: AbortSignal) {
   const extra = type === 'movie' ? 'release_dates' : 'content_ratings';
-  const [ruRes, enRes, trailerKey] = await Promise.all([
+  const [ruRes, enRes] = await Promise.all([
     fetchWithTimeout(
-      `https://api.themoviedb.org/3/${type}/${id}?language=ru-RU&append_to_response=credits,external_ids,watch/providers,recommendations,similar,${extra}`,
-      { headers: { Authorization: `Bearer ${TOKEN}` } }
+      `https://api.themoviedb.org/3/${type}/${id}?language=ru-RU&append_to_response=credits,external_ids,watch/providers,recommendations,similar,videos,${extra}`,
+      { headers: { Authorization: `Bearer ${TOKEN}` }, signal }
     ),
-    fetchWithTimeout(`https://api.themoviedb.org/3/${type}/${id}?language=en-US`, {
-      headers: { Authorization: `Bearer ${TOKEN}` },
+    fetchWithTimeout(`https://api.themoviedb.org/3/${type}/${id}?language=en-US&append_to_response=videos`, {
+      headers: { Authorization: `Bearer ${TOKEN}` }, signal,
     }),
-    getTrailer(id, type),
   ]);
 
   const ruData = await ruRes.json();
   const enData = await enRes.json();
+  const trailerRu = ruData.videos?.results?.find((v: any) => v.type === 'Trailer' && v.site === 'YouTube');
+  const trailerEn = enData.videos?.results?.find((v: any) => v.type === 'Trailer' && v.site === 'YouTube');
   const recSource = ruData.recommendations?.results?.length
     ? ruData.recommendations.results
     : ruData.similar?.results;
@@ -149,7 +175,7 @@ async function fetchFullDetails(id: number, type: string) {
     titleEn: enData.title || enData.name,
     overview: ruData.overview || enData.overview,
     poster: ruData.poster_path ? `https://image.tmdb.org/t/p/w500${ruData.poster_path}` : null,
-    trailerKey,
+    trailerKey: trailerRu?.key || trailerEn?.key || null,
     mediaType: type,
     rating: ruData.vote_average ? ruData.vote_average.toFixed(1) : null,
     year: (ruData.release_date || ruData.first_air_date || '').slice(0, 4),
@@ -171,10 +197,26 @@ async function fetchFullDetails(id: number, type: string) {
   };
 }
 
-async function fetchRandom(genreId: number, mediaType: string, recentRandomIds: string[]) {
+async function fetchRandom(
+  selectedGenres: number[],
+  mediaType: string,
+  adultContent: boolean,
+  filters: any,
+  recentRandomIds: string[]
+) {
   const type = mediaType === 'tv' ? 'tv' : 'movie';
-  const params: any = { sort_by: 'popularity.desc', language: 'ru-RU' };
-  if (genreId) params.with_genres = String(genreId);
+  const params: any = {
+    sort_by: 'popularity.desc',
+    language: 'ru-RU',
+    include_adult: String(adultContent),
+  };
+  const genres = selectedGenres.filter(g => g !== 0);
+  if (genres.length > 0) params.with_genres = genres.join(',');
+  if (filters.yearFrom) params[type === 'movie' ? 'primary_release_date.gte' : 'first_air_date.gte'] = `${filters.yearFrom}-01-01`;
+  if (filters.yearTo) params[type === 'movie' ? 'primary_release_date.lte' : 'first_air_date.lte'] = `${filters.yearTo}-12-31`;
+  if (filters.minRating > 0) params['vote_average.gte'] = String(filters.minRating);
+  if (filters.maxRating < 10) params['vote_average.lte'] = String(filters.maxRating);
+  if (filters.country) params.with_origin_country = filters.country;
 
   for (let attempt = 0; attempt < 5; attempt += 1) {
     params.page = String(Math.floor(Math.random() * 20) + 1);
@@ -183,13 +225,20 @@ async function fetchRandom(genreId: number, mediaType: string, recentRandomIds: 
       { headers: { Authorization: `Bearer ${TOKEN}` } }
     );
     const data = await res.json();
-    const items = (data.results || []).filter(
-      (m: any) => m.poster_path && !recentRandomIds.includes(`${type}-${m.id}`)
-    );
+    const posterItems = (data.results || []).filter((m: any) => m.poster_path);
+    const freshItems = posterItems.filter((m: any) => !recentRandomIds.includes(`${type}-${m.id}`));
+    const items = freshItems.length > 0 ? freshItems : (attempt >= 3 ? posterItems : []);
     if (items.length > 0) {
       const item = items[Math.floor(Math.random() * items.length)];
       const details = await fetchFullDetails(item.id, type);
-      return { ...details, genreId, mediaType };
+      return {
+        ...details,
+        genreId: genres[0] ?? 0,
+        selectedGenres: genres,
+        preciseFilters: filters,
+        mediaType,
+        randomNotice: freshItems.length === 0 ? RANDOM_REUSE_NOTICE : null,
+      };
     }
   }
   throw new Error('Все свежие варианты уже попадались. Попробуй другой жанр или фильтр.');
@@ -201,8 +250,12 @@ export default function MovieScreen({ route, navigation }: any) {
   const [hydrating, setHydrating] = useState(false);
   const [skeletonVisible, setSkeletonVisible] = useState(false);
   const [error, setError] = useState('');
+  const [randomNotice, setRandomNotice] = useState(route.params?.randomNotice || route.params?.movie?.randomNotice || '');
   const [showOnline, setShowOnline] = useState(false);
   const [showTrailer, setShowTrailer] = useState(false);
+  const relatedAbortRef = useRef<AbortController | null>(null);
+  const { width } = useWindowDimensions();
+  const videoWidth = Math.max(width - 40, 280);
 
   // Related / recommendations infinite scroll
   const [relatedItems, setRelatedItems] = useState<any[]>([]);
@@ -213,13 +266,18 @@ export default function MovieScreen({ route, navigation }: any) {
   const {
     addToWatchlist, removeFromWatchlist, isInWatchlist,
     getUserStatus, setUserStatus, clearUserStatus,
-    recentRandomIds, addRecentRandom,
+    recentRandomIds, addRecentRandom, adultContent,
   } = useAppContext();
 
   const inWatchlist = movie.id ? isInWatchlist(movie.id, movie.mediaType) : false;
   const canLoadRandom = movie.genreId !== undefined && movie.genreId !== null;
   const currentStatus = movie.id ? getUserStatus(movie.id, movie.mediaType) : null;
   const title = movie.titleRu || movie.titleEn;
+  const displayTitle = movie.titleRu && movie.titleEn && movie.titleRu !== movie.titleEn
+    ? `${movie.titleRu} / ${movie.titleEn}`
+    : (movie.titleRu || movie.titleEn || '');
+  const activePreciseFilters = movie.preciseFilters || route.params?.preciseFilters || defaultPreciseFilters;
+  const activeRandomGenres = movie.selectedGenres || (movie.genreId ? [movie.genreId] : [0]);
 
   // Initialize related items when movie changes
   useEffect(() => {
@@ -229,40 +287,64 @@ export default function MovieScreen({ route, navigation }: any) {
     setRelatedHasMore((movie.recommendationsTotalPages || 1) > 1);
   }, [movie.id]);
 
-  // Hydrate missing details
   useEffect(() => {
+    return () => {
+      relatedAbortRef.current?.abort();
+    };
+  }, []);
+
+  // Hydrate missing details.
+  // Always reset hydrating up-front so a rapid movie switch (openRelated →
+  // loadNext) can't leave the indicator stuck on after the prior effect's
+  // mounted=false flag swallowed its setHydrating(false).
+  useEffect(() => {
+    setHydrating(false);
+    if (!movie.id || movie.cast || movie.providers || movie.recommendations) return;
     let mounted = true;
-    async function hydrate() {
-      if (!movie.id || movie.cast || movie.providers || movie.recommendations) return;
+    const controller = new AbortController();
+    (async () => {
       setHydrating(true);
       try {
-        const details = await fetchFullDetails(movie.id, movie.mediaType);
+        const details = await fetchFullDetails(movie.id, movie.mediaType, controller.signal);
         if (mounted) setMovie((prev: any) => ({ ...prev, ...details, genreId: prev.genreId }));
       } catch (e: any) {
+        if (e?.name === 'AbortError') return;
         if (mounted) setError(e.message || 'Не удалось загрузить детали.');
       }
       if (mounted) setHydrating(false);
-    }
-    hydrate();
-    return () => { mounted = false; };
+    })();
+    return () => {
+      mounted = false;
+      controller.abort();
+    };
   }, [movie.id, movie.mediaType]);
 
   const loadMoreRelated = async () => {
     if (relatedLoadingMore || !relatedHasMore || !movie.id) return;
+    relatedAbortRef.current?.abort();
+    const controller = new AbortController();
+    relatedAbortRef.current = controller;
     setRelatedLoadingMore(true);
     try {
       const nextPage = relatedPage + 1;
       const res = await fetchWithTimeout(
         `https://api.themoviedb.org/3/${movie.mediaType}/${movie.id}/recommendations?language=ru-RU&page=${nextPage}`,
-        { headers: { Authorization: `Bearer ${TOKEN}` } }
+        { headers: { Authorization: `Bearer ${TOKEN}` }, signal: controller.signal }
       );
       const data = await res.json();
+      if (controller.signal.aborted) return;
       const more = normalizeRelated(data.results, movie.mediaType);
       setRelatedItems(prev => dedup([...prev, ...more]));
       setRelatedPage(nextPage);
       setRelatedHasMore(nextPage < (data.total_pages || 1));
-    } catch { /* silent */ }
-    setRelatedLoadingMore(false);
+    } catch (e: any) {
+      if (e?.name !== 'AbortError') {
+        // Keep recommendations best-effort; the main details are already loaded.
+      }
+    } finally {
+      if (relatedAbortRef.current === controller) relatedAbortRef.current = null;
+      if (!controller.signal.aborted) setRelatedLoadingMore(false);
+    }
   };
 
   const toggleWatchlist = () => {
@@ -271,24 +353,36 @@ export default function MovieScreen({ route, navigation }: any) {
   };
 
   const handleShare = async () => {
-    const url = `https://www.themoviedb.org/${movie.mediaType}/${movie.id}`;
-    await Share.share({ message: `${title} (${movie.year})\n${url}`, title });
+    try {
+      const url = `https://www.themoviedb.org/${movie.mediaType}/${movie.id}`;
+      await Share.share({ message: `${title} (${movie.year})\n${url}`, title: title || '' });
+    } catch {
+      // User dismissed the share sheet or share isn't available on this platform.
+    }
   };
 
-  const openTrailerInYouTube = () => {
+  const openTrailerInYouTube = async () => {
     if (!movie.trailerKey) return;
-    Linking.openURL(`https://www.youtube.com/watch?v=${movie.trailerKey}`);
+    try {
+      await Linking.openURL(`https://www.youtube.com/watch?v=${movie.trailerKey}`);
+    } catch {
+      Alert.alert('Не удалось открыть', 'YouTube недоступен на этом устройстве.');
+    }
   };
 
   const openSource = async (source: typeof ONLINE_SOURCES[0]) => {
     setShowOnline(false);
-    const sourceTitle = movie.titleEn || movie.titleRu;
-    if (source.deeplink) {
-      const deeplink = source.deeplink(sourceTitle);
-      const canOpen = await Linking.canOpenURL(deeplink);
-      if (canOpen) { Linking.openURL(deeplink); return; }
+    const sourceTitle = movie.titleEn || movie.titleRu || '';
+    try {
+      if (source.deeplink) {
+        const deeplink = source.deeplink(sourceTitle);
+        const canOpen = await Linking.canOpenURL(deeplink);
+        if (canOpen) { await Linking.openURL(deeplink); return; }
+      }
+      await Linking.openURL(source.getUrl(sourceTitle));
+    } catch {
+      Alert.alert('Не удалось открыть', `Сервис ${source.name} недоступен.`);
     }
-    Linking.openURL(source.getUrl(sourceTitle));
   };
 
   const loadNext = async () => {
@@ -296,11 +390,13 @@ export default function MovieScreen({ route, navigation }: any) {
     setLoadingNext(true);
     setSkeletonVisible(true);
     setError('');
+    setRandomNotice('');
     setShowTrailer(false);
     try {
-      const next = await fetchRandom(movie.genreId, movie.mediaType, recentRandomIds);
+      const next = await fetchRandom(activeRandomGenres, movie.mediaType, adultContent, activePreciseFilters, recentRandomIds);
       addRecentRandom(next.id, next.mediaType);
       setMovie(next);
+      setRandomNotice(next.randomNotice || '');
     } catch (e: any) {
       setError(e.message || 'Ошибка загрузки.');
     }
@@ -350,6 +446,11 @@ export default function MovieScreen({ route, navigation }: any) {
             <Text style={styles.backText}>Назад</Text>
           </TouchableOpacity>
           <View style={styles.topActions}>
+            {canLoadRandom && (
+              <TouchableOpacity style={[styles.iconBtn, styles.rerollBtn]} onPress={loadNext}>
+                <Ionicons name="shuffle" size={20} color="#e50914" />
+              </TouchableOpacity>
+            )}
             {movie.id && (
               <TouchableOpacity style={styles.iconBtn} onPress={handleShare}>
                 <Ionicons name="share-outline" size={20} color="#aaa" />
@@ -371,7 +472,7 @@ export default function MovieScreen({ route, navigation }: any) {
           </View>
         )}
 
-        <Text style={styles.title}>{movie.titleRu} / {movie.titleEn}</Text>
+        <Text style={styles.title}>{displayTitle}</Text>
 
         <View style={styles.metaRow}>
           {movie.rating && (
@@ -409,7 +510,7 @@ export default function MovieScreen({ route, navigation }: any) {
                   style={[styles.statusChip, active && styles.statusChipActive]}
                   onPress={() => {
                     if (active) clearUserStatus(movie.id, movie.mediaType);
-                    else setUserStatus(movie.id, movie.mediaType, status.key);
+                    else setUserStatus(movie, status.key);
                   }}
                 >
                   <Ionicons name={status.icon} size={14} color={active ? '#fff' : '#777'} />
@@ -444,6 +545,12 @@ export default function MovieScreen({ route, navigation }: any) {
           </View>
         )}
 
+        {randomNotice ? (
+          <View style={styles.noticeBox}>
+            <Text style={styles.noticeText}>{randomNotice}</Text>
+          </View>
+        ) : null}
+
         {error ? (
           <View style={styles.errorBox}>
             <Text style={styles.errorText}>{error}</Text>
@@ -463,12 +570,19 @@ export default function MovieScreen({ route, navigation }: any) {
         )}
 
         {showTrailer && movie.trailerKey && (
-          <View style={styles.videoContainer}>
+          <View style={[styles.videoContainer, { width: videoWidth }]}>
             <YoutubePlayer
               videoId={movie.trailerKey}
-              height={Math.round((width - 40) * 0.56)}
+              height={Math.round(videoWidth * 0.56)}
               play={showTrailer}
               onChangeState={(state: string) => { if (state === 'ended') setShowTrailer(false); }}
+              onError={() => {
+                setShowTrailer(false);
+                Alert.alert('Трейлер недоступен', 'Видео удалено или заблокировано. Открыть на YouTube?', [
+                  { text: 'Отмена', style: 'cancel' },
+                  { text: 'Открыть', onPress: openTrailerInYouTube },
+                ]);
+              }}
             />
             <TouchableOpacity style={styles.closeVideo} onPress={() => setShowTrailer(false)}>
               <Ionicons name="close-circle" size={20} color="#aaa" />
@@ -598,6 +712,7 @@ const styles = StyleSheet.create({
   backText: { color: '#aaa', fontSize: 14 },
   topActions: { flexDirection: 'row', gap: 8 },
   iconBtn: { backgroundColor: '#1e1e30', borderRadius: 12, width: 38, height: 38, alignItems: 'center', justifyContent: 'center' },
+  rerollBtn: { borderWidth: 1, borderColor: '#e50914' },
   poster: { width: 220, height: 330, borderRadius: 16, marginBottom: 24 },
   posterFallback: { backgroundColor: '#1e1e30', alignItems: 'center', justifyContent: 'center' },
   title: { fontSize: 20, fontWeight: 'bold', color: '#fff', textAlign: 'center', marginBottom: 12 },
@@ -617,18 +732,20 @@ const styles = StyleSheet.create({
   statusTextActive: { color: '#fff' },
   infoBlock: { width: '100%', backgroundColor: '#1e1e30', borderRadius: 14, padding: 14, marginBottom: 12 },
   infoText: { color: '#ccc', fontSize: 14, lineHeight: 20 },
+  noticeBox: { backgroundColor: '#1e1e40', borderWidth: 1, borderColor: '#8888ff', borderRadius: 12, padding: 14, marginBottom: 16, width: '100%' },
+  noticeText: { color: '#bbb', fontSize: 13, textAlign: 'center' },
   errorBox: { backgroundColor: '#2a0a0a', borderRadius: 12, padding: 16, marginBottom: 16, alignItems: 'center', width: '100%' },
   errorText: { color: '#e50914', fontSize: 14, textAlign: 'center', marginBottom: 8 },
   retryText: { color: '#fff', fontSize: 14, fontWeight: '600' },
   trailerBtn: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: '#e50914', paddingHorizontal: 32, paddingVertical: 14, borderRadius: 30, marginBottom: 12 },
   trailerText: { color: '#fff', fontWeight: '700', fontSize: 16 },
-  videoContainer: { width: width - 40, marginBottom: 16, borderRadius: 12, overflow: 'hidden' },
+  videoContainer: { marginBottom: 16, borderRadius: 12, overflow: 'hidden' },
   closeVideo: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, marginTop: 8 },
   closeVideoText: { color: '#aaa', fontSize: 13 },
   youtubeFallback: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, marginTop: 10 },
   youtubeFallbackText: { color: '#e50914', fontSize: 13, fontWeight: '600' },
   noTrailer: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: '#1e1e30', paddingHorizontal: 24, paddingVertical: 12, borderRadius: 30, marginBottom: 12 },
-  noTrailerText: { color: '#555', fontSize: 14 },
+  noTrailerText: { color: '#888', fontSize: 14 },
   onlineBtn: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: '#1e1e40', borderWidth: 1, borderColor: '#8888ff', paddingHorizontal: 32, paddingVertical: 14, borderRadius: 30, marginBottom: 12 },
   onlineBtnText: { color: '#8888ff', fontWeight: '700', fontSize: 16 },
   relatedBlock: { width: '100%', marginBottom: 16 },
@@ -653,7 +770,7 @@ const styles = StyleSheet.create({
   sourceIconWrap: { width: 44, height: 44, backgroundColor: '#1e1e30', borderRadius: 12, alignItems: 'center', justifyContent: 'center', marginRight: 14 },
   sourceInfo: { flex: 1 },
   sourceName: { color: '#fff', fontWeight: '600', fontSize: 16 },
-  sourceHint: { color: '#666', fontSize: 12, marginTop: 2 },
+  sourceHint: { color: '#888', fontSize: 12, marginTop: 2 },
   cancelBtn: { alignItems: 'center', marginTop: 8, paddingVertical: 14 },
   cancelText: { color: '#aaa', fontSize: 16 },
   castRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 4 },

@@ -31,6 +31,7 @@ export default function PaginationBar({
 }: Props) {
   const [showGoTo, setShowGoTo] = useState(false);
   const [input, setInput] = useState('');
+  const [inputError, setInputError] = useState('');
 
   if (totalPages <= 1) return null;
 
@@ -38,9 +39,20 @@ export default function PaginationBar({
 
   const submit = () => {
     const p = parseInt(input, 10);
-    if (p >= 1 && p <= totalPages) onPageChange(p);
+    if (Number.isFinite(p) && p >= 1 && p <= totalPages) {
+      onPageChange(p);
+      setShowGoTo(false);
+      setInput('');
+      setInputError('');
+      return;
+    }
+    setInputError(`Введи число от 1 до ${totalPages}`);
+  };
+
+  const closeGoTo = () => {
     setShowGoTo(false);
     setInput('');
+    setInputError('');
   };
 
   return (
@@ -90,8 +102,8 @@ export default function PaginationBar({
         </TouchableOpacity>
       </View>
 
-      <Modal visible={showGoTo} transparent animationType="fade" onRequestClose={() => setShowGoTo(false)}>
-        <TouchableOpacity style={s.overlay} activeOpacity={1} onPress={() => setShowGoTo(false)}>
+      <Modal visible={showGoTo} transparent animationType="fade" onRequestClose={closeGoTo}>
+        <TouchableOpacity style={s.overlay} activeOpacity={1} onPress={closeGoTo}>
           <TouchableOpacity activeOpacity={1} style={s.dialog}>
             <Text style={s.dialogTitle}>Перейти к странице</Text>
             <TextInput
@@ -100,10 +112,11 @@ export default function PaginationBar({
               placeholder={`1 – ${totalPages}`}
               placeholderTextColor="#555"
               value={input}
-              onChangeText={setInput}
+              onChangeText={v => { setInput(v); if (inputError) setInputError(''); }}
               autoFocus
               onSubmitEditing={submit}
             />
+            {inputError ? <Text style={s.dialogError}>{inputError}</Text> : null}
             <TouchableOpacity style={s.dialogBtn} onPress={submit}>
               <Text style={s.dialogBtnText}>Перейти</Text>
             </TouchableOpacity>
@@ -144,4 +157,5 @@ const s = StyleSheet.create({
   },
   dialogBtn: { backgroundColor: '#e50914', borderRadius: 12, paddingHorizontal: 32, paddingVertical: 12 },
   dialogBtnText: { color: '#fff', fontWeight: '700', fontSize: 15 },
+  dialogError: { color: '#e50914', fontSize: 12, textAlign: 'center', marginTop: -8 },
 });

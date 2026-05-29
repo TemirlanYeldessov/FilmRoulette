@@ -7,6 +7,7 @@ import { useState } from 'react';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import ActorScreen from './screens/ActorScreen';
 import CatalogScreen from './screens/CatalogScreen';
+import FavoritesScreen from './screens/FavoritesScreen';
 import MoodScreen from './screens/MoodScreen';
 import MovieScreen from './screens/MovieScreen';
 import SettingsScreen from './screens/SettingsScreen';
@@ -17,6 +18,7 @@ const Tab = createBottomTabNavigator();
 const CatalogStack = createStackNavigator();
 const TopStack = createStackNavigator();
 const MoodStack = createStackNavigator();
+const FavoritesStack = createStackNavigator();
 const SettingsStack = createStackNavigator();
 
 function CatalogStackScreen() {
@@ -46,6 +48,16 @@ function MoodStackScreen() {
       <MoodStack.Screen name="Card" component={MovieScreen} />
       <MoodStack.Screen name="Actor" component={ActorScreen} />
     </MoodStack.Navigator>
+  );
+}
+
+function FavoritesStackScreen() {
+  return (
+    <FavoritesStack.Navigator screenOptions={{ headerShown: false }}>
+      <FavoritesStack.Screen name="FavoritesHome" component={FavoritesScreen} />
+      <FavoritesStack.Screen name="Card" component={MovieScreen} />
+      <FavoritesStack.Screen name="Actor" component={ActorScreen} />
+    </FavoritesStack.Navigator>
   );
 }
 
@@ -172,7 +184,13 @@ function OnboardingModal() {
 }
 
 function AppTabs() {
-  const { watchlist } = useAppContext();
+  const { watchlist, hydrated } = useAppContext();
+
+  // Hold the UI back until AsyncStorage resolves — prevents the brief flash
+  // where the main screen renders before the onboarding modal pops in.
+  if (!hydrated) {
+    return <View style={styles.splash} />;
+  }
 
   return (
     <>
@@ -219,6 +237,22 @@ function AppTabs() {
         />
 
         <Tab.Screen
+          name="Favorites"
+          component={FavoritesStackScreen}
+          options={{
+            tabBarLabel: 'Избранное',
+            tabBarIcon: ({ focused, color }) => (
+              <TabIcon
+                name={focused ? 'heart' : 'heart-outline'}
+                focused={focused}
+                color={color}
+                badge={watchlist.length}
+              />
+            ),
+          }}
+        />
+
+        <Tab.Screen
           name="Settings"
           component={SettingsStackScreen}
           options={{
@@ -228,7 +262,6 @@ function AppTabs() {
                 name={focused ? 'settings' : 'settings-outline'}
                 focused={focused}
                 color={color}
-                badge={watchlist.length}
               />
             ),
           }}
@@ -253,6 +286,7 @@ export default function App() {
 }
 
 const styles = StyleSheet.create({
+  splash: { flex: 1, backgroundColor: '#0f0f1a' },
   tabBar: {
     backgroundColor: '#0f0f1a',
     borderTopColor: '#1e1e30',

@@ -1,7 +1,7 @@
 import { LinearGradient } from 'expo-linear-gradient';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Dimensions,
+  Alert,
   FlatList,
   Modal,
   RefreshControl,
@@ -10,6 +10,7 @@ import {
   Text,
   TextInput,
   TouchableOpacity,
+  useWindowDimensions,
   View,
 } from 'react-native';
 import { Image } from 'expo-image';
@@ -17,10 +18,9 @@ import { Ionicons } from '@expo/vector-icons';
 import { useAppContext } from '../store/AppContext';
 import { MovieCardSkeleton } from '../components/Skeleton';
 import PaginationBar from '../components/PaginationBar';
+import CardMark from '../components/CardMark';
+import { getCached, setCached, LIST_TTL } from '../utils/apiCache';
 import { TMDB_TOKEN as TOKEN } from '../constants/api';
-
-const { width } = Dimensions.get('window');
-const cardWidth = (width - 48) / 2;
 
 const MEDIA_TABS = [
   { key: 'movie', label: 'Фильмы' },
@@ -66,31 +66,64 @@ const SORT_OPTIONS = [
 const SKELETON_KEYS = [1, 2, 3, 4, 5, 6];
 const ITEMS_PER_PAGE = 20;
 
+function assertValidTmdbPayload(data: any) {
+  if (data?.success === false || data?.status_code) {
+    throw new Error(data.status_message || 'TMDB error');
+  }
+  return data;
+}
+
+function withCheckedJson(res: Response) {
+  const json = res.json.bind(res);
+  (res as any).json = async () => assertValidTmdbPayload(await json());
+  return res;
+}
+
+function areFiltersEqual(a: any, b: any) {
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
 async function fetchWithTimeout(url: string, options: any = {}, timeout = 10000) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeout);
+  const externalSignal: AbortSignal | undefined = options.signal;
+  const onExternalAbort = () => controller.abort();
+  if (externalSignal) {
+    if (externalSignal.aborted) controller.abort();
+    else externalSignal.addEventListener('abort', onExternalAbort);
+  }
   try {
     const res = await fetch(url, { ...options, signal: controller.signal });
-    clearTimeout(timer);
-    return res;
+    if (!res.ok) throw new Error('TMDB временно не отвечает. Попробуй ещё раз.');
+    return withCheckedJson(res);
   } catch (e: any) {
-    clearTimeout(timer);
-    if (e.name === 'AbortError') throw new Error('Превышено время ожидания.');
+    if (e.name === 'AbortError') {
+      if (externalSignal?.aborted) throw e;
+      throw new Error('Превышено время ожидания.');
+    }
     throw e;
+  } finally {
+    clearTimeout(timer);
+    if (externalSignal) externalSignal.removeEventListener('abort', onExternalAbort);
   }
 }
 
 async function fetchItems(mediaType: string, category: string, page: number) {
+  const cacheKey = `top:${mediaType}:${category}:${page}`;
+  const cached = getCached(cacheKey, LIST_TTL);
+  if (cached) return cached;
   const url = category === 'trending'
     ? `https://api.themoviedb.org/3/trending/${mediaType}/week?language=ru-RU&page=${page}`
     : `https://api.themoviedb.org/3/${mediaType}/${category}?language=ru-RU&page=${page}`;
   const res = await fetchWithTimeout(url, { headers: { Authorization: `Bearer ${TOKEN}` } });
   const data = await res.json();
-  return {
+  const result = {
     results: (data.results || []).filter((m: any) => m.poster_path),
     totalPages: Math.min(data.total_pages || 1, 500),
     totalResults: data.total_results || 0,
   };
+  setCached(cacheKey, result);
+  return result;
 }
 
 async function searchItems(query: string, mediaType: string, adultContent: boolean, page = 1) {
@@ -146,8 +179,14 @@ function itemToMovie(item: any, fallbackType: string) {
 
 const defaultFilters = { minRating: 0, language: '', country: '', yearFrom: '', yearTo: '', sortBy: 'popularity.desc' };
 
+function isDefaultFilters(f: typeof defaultFilters) {
+  return !f.minRating && !f.language && !f.country && !f.yearFrom && !f.yearTo && f.sortBy === 'popularity.desc';
+}
+
 export default function TopScreen({ navigation }: any) {
   const { adultContent } = useAppContext();
+  const { width } = useWindowDimensions();
+  const cardWidth = useMemo(() => (width - 48) / 2, [width]);
   const [mediaType, setMediaType] = useState('movie');
   const [category, setCategory] = useState('top_rated');
   const [items, setItems] = useState<any[]>([]);
@@ -163,21 +202,31 @@ export default function TopScreen({ navigation }: any) {
   const [showFilters, setShowFilters] = useState(false);
   const [filters, setFilters] = useState(defaultFilters);
   const [localFilters, setLocalFilters] = useState(defaultFilters);
+  const [error, setError] = useState('');
 
   const lastQueryRef = useRef('');
   const activeFiltersRef = useRef(defaultFilters);
   const listRef = useRef<FlatList>(null);
+  // Monotonic request id — ignore results from stale requests.
+  const requestIdRef = useRef(0);
 
   const load = useCallback(async (mt: string, cat: string, page: number) => {
+    const myId = ++requestIdRef.current;
     setLoading(true);
+    setError('');
     try {
       const { results, totalPages: tp, totalResults: tr } = await fetchItems(mt, cat, page);
+      if (requestIdRef.current !== myId) return;
       setItems(results);
       setTotalPages(tp);
       setTotalResults(tr);
       setCurrentPage(page);
-    } catch (e) { console.error(e); }
-    setLoading(false);
+    } catch (e: any) {
+      if (requestIdRef.current !== myId) return;
+      setError(e?.message || 'Не удалось загрузить. Попробуй ещё раз.');
+    } finally {
+      if (requestIdRef.current === myId) setLoading(false);
+    }
   }, []);
 
   useEffect(() => {
@@ -207,63 +256,120 @@ export default function TopScreen({ navigation }: any) {
     if (loading || searching) return;
     listRef.current?.scrollToOffset({ offset: 0, animated: false });
     if (isSearchMode) {
+      const myId = ++requestIdRef.current;
+      const prevPage = currentPage;
       setSearching(true);
+      setError('');
       setCurrentPage(page);
       try {
-        if (lastQueryRef.current) {
-          const { results, totalPages: tp, totalResults: tr } = await searchItems(lastQueryRef.current, mediaType, adultContent, page);
-          setItems(results);
-          setTotalPages(tp);
-          setTotalResults(tr);
-        } else {
-          const { results, totalPages: tp, totalResults: tr } = await discoverWithFilters(mediaType, activeFiltersRef.current, adultContent, page);
-          setItems(results);
-          setTotalPages(tp);
-          setTotalResults(tr);
-        }
-      } catch { /* silent */ }
-      setSearching(false);
+        const { results, totalPages: tp, totalResults: tr } = lastQueryRef.current
+          ? await searchItems(lastQueryRef.current, mediaType, adultContent, page)
+          : await discoverWithFilters(mediaType, activeFiltersRef.current, adultContent, page);
+        if (requestIdRef.current !== myId) return;
+        setItems(results);
+        setTotalPages(tp);
+        setTotalResults(tr);
+      } catch (e: any) {
+        if (requestIdRef.current !== myId) return;
+        setCurrentPage(prevPage);
+        setError(e?.message || 'Не удалось перейти на страницу.');
+      } finally {
+        if (requestIdRef.current === myId) setSearching(false);
+      }
     } else {
       await load(mediaType, category, page);
     }
   };
 
-  const handleSearch = async (q: string) => {
-    setSearchQuery(q);
-    if (!q.trim()) {
-      setIsSearchMode(false);
-      lastQueryRef.current = '';
-      load(mediaType, category, 1);
+  // Debounced search — wait 400ms after typing stops, ignore stale results,
+  // and cancel the in-flight request when a new keystroke supersedes it.
+  useEffect(() => {
+    const q = searchQuery.trim();
+    if (!q) {
+      if (isSearchMode) {
+        setIsSearchMode(false);
+        lastQueryRef.current = '';
+        load(mediaType, category, 1);
+      }
       return;
     }
-    lastQueryRef.current = q.trim();
+    const myId = ++requestIdRef.current;
     setIsSearchMode(true);
     setSearching(true);
-    try {
-      const { results, totalPages: tp, totalResults: tr } = await searchItems(q, mediaType, adultContent, 1);
-      setItems(results);
-      setTotalPages(tp);
-      setTotalResults(tr);
-      setCurrentPage(1);
-    } catch (e) { console.error(e); }
-    setSearching(false);
-  };
+    setError('');
+    const timer = setTimeout(async () => {
+      try {
+        const { results, totalPages: tp, totalResults: tr } = await searchItems(q, mediaType, adultContent, 1);
+        if (requestIdRef.current !== myId) return;
+        lastQueryRef.current = q;
+        setItems(results);
+        setTotalPages(tp);
+        setTotalResults(tr);
+        setCurrentPage(1);
+      } catch (e: any) {
+        if (requestIdRef.current !== myId) return;
+        setError(e?.message || 'Не удалось выполнить поиск.');
+        setItems([]);
+        setTotalPages(1);
+        setTotalResults(0);
+      } finally {
+        if (requestIdRef.current === myId) setSearching(false);
+      }
+    }, 400);
+    return () => clearTimeout(timer);
+  }, [searchQuery, mediaType, adultContent, category, load]);
 
-  const applyFilters = async (f: any) => {
+  const applyFilters = async (rawF: any) => {
+    const f = { ...rawF };
+    const yf = parseInt(f.yearFrom, 10);
+    const yt = parseInt(f.yearTo, 10);
+    if (Number.isFinite(yf) && Number.isFinite(yt) && yf > yt) {
+      f.yearFrom = String(yt);
+      f.yearTo = String(yf);
+    }
     setFilters(f);
     activeFiltersRef.current = f;
-    lastQueryRef.current = '';
     setShowFilters(false);
+    // No filters set → stay on the current category instead of silently
+    // swapping to a default Discover query that looks identical to popular.
+    if (isDefaultFilters(f)) {
+      if (isSearchMode) {
+        setIsSearchMode(false);
+        lastQueryRef.current = '';
+        load(mediaType, category, 1);
+      }
+      return;
+    }
+    const myId = ++requestIdRef.current;
+    lastQueryRef.current = '';
     setIsSearchMode(true);
     setSearching(true);
+    setError('');
     setCurrentPage(1);
     try {
       const { results, totalPages: tp, totalResults: tr } = await discoverWithFilters(mediaType, f, adultContent, 1);
+      if (requestIdRef.current !== myId) return;
       setItems(results);
       setTotalPages(tp);
       setTotalResults(tr);
-    } catch (e) { console.error(e); }
-    setSearching(false);
+    } catch (e: any) {
+      if (requestIdRef.current !== myId) return;
+      setError(e?.message || 'Не удалось применить фильтры.');
+    } finally {
+      if (requestIdRef.current === myId) setSearching(false);
+    }
+  };
+
+  const closeFiltersWithConfirm = () => {
+    if (areFiltersEqual(localFilters, filters)) {
+      setShowFilters(false);
+      return;
+    }
+    Alert.alert('Есть несохранённые изменения', 'Применить изменения фильтров?', [
+      { text: 'Отмена', style: 'cancel' },
+      { text: 'Не применять', style: 'destructive', onPress: () => setShowFilters(false) },
+      { text: 'Применить', onPress: () => applyFilters(localFilters) },
+    ]);
   };
 
   const openCard = (item: any) => {
@@ -297,11 +403,11 @@ export default function TopScreen({ navigation }: any) {
               placeholder="Поиск в топе..."
               placeholderTextColor="#555"
               value={searchQuery}
-              onChangeText={handleSearch}
+              onChangeText={setSearchQuery}
               returnKeyType="search"
             />
             {searchQuery.length > 0 && (
-              <TouchableOpacity onPress={() => { setSearchQuery(''); setIsSearchMode(false); lastQueryRef.current = ''; load(mediaType, category, 1); }}>
+              <TouchableOpacity onPress={() => setSearchQuery('')}>
                 <Ionicons name="close-circle" size={16} color="#555" />
               </TouchableOpacity>
             )}
@@ -335,6 +441,14 @@ export default function TopScreen({ navigation }: any) {
           columnWrapperStyle={styles.row}
           renderItem={() => <MovieCardSkeleton cardWidth={cardWidth} />}
         />
+      ) : error ? (
+        <View style={styles.empty}>
+          <Ionicons name="cloud-offline-outline" size={38} color="#555" />
+          <Text style={styles.emptyText}>{error}</Text>
+          <TouchableOpacity style={styles.retryBtn} onPress={() => load(mediaType, category, currentPage)}>
+            <Text style={styles.retryText}>Повторить</Text>
+          </TouchableOpacity>
+        </View>
       ) : items.length === 0 ? (
         <View style={styles.empty}>
           <Text style={styles.emptyText}>Ничего не найдено</Text>
@@ -355,15 +469,16 @@ export default function TopScreen({ navigation }: any) {
           renderItem={({ item, index }) => {
             const rank = (currentPage - 1) * ITEMS_PER_PAGE + index + 1;
             return (
-              <TouchableOpacity style={styles.card} onPress={() => openCard(item)}>
+              <TouchableOpacity style={[styles.card, { width: cardWidth }]} onPress={() => openCard(item)}>
                 {!isSearchMode && (
                   <View style={styles.rankBadge}>
                     <Text style={styles.rankText}>#{rank}</Text>
                   </View>
                 )}
+                <CardMark id={item.id} mediaType={item.media_type || mediaType} />
                 <Image
                   source={{ uri: `https://image.tmdb.org/t/p/w300${item.poster_path}` }}
-                  style={styles.poster}
+                  style={[styles.poster, { width: cardWidth, height: cardWidth * 1.5 }]}
                   contentFit="cover"
                   transition={200}
                   cachePolicy="memory-disk"
@@ -385,8 +500,8 @@ export default function TopScreen({ navigation }: any) {
         />
       )}
 
-      <Modal visible={showFilters} transparent animationType="slide" onRequestClose={() => setShowFilters(false)}>
-        <TouchableOpacity style={fStyles.overlay} activeOpacity={1} onPress={() => setShowFilters(false)}>
+      <Modal visible={showFilters} transparent animationType="slide" onRequestClose={closeFiltersWithConfirm}>
+        <TouchableOpacity style={fStyles.overlay} activeOpacity={1} onPress={closeFiltersWithConfirm}>
           <TouchableOpacity activeOpacity={1} style={fStyles.sheet}>
             <View style={fStyles.handle} />
             <Text style={fStyles.title}>Фильтры</Text>
@@ -479,14 +594,16 @@ const styles = StyleSheet.create({
   catChipTextActive: { color: '#8888ff', fontWeight: '600' },
   grid: { padding: 12 },
   row: { justifyContent: 'space-between', marginBottom: 12 },
-  card: { width: cardWidth },
+  card: {},
   rankBadge: { position: 'absolute', top: 8, left: 8, backgroundColor: '#e50914', borderRadius: 10, paddingHorizontal: 8, paddingVertical: 3, zIndex: 1 },
   rankText: { color: '#fff', fontWeight: 'bold', fontSize: 12 },
-  poster: { width: cardWidth, height: cardWidth * 1.5, borderRadius: 10, marginBottom: 6 },
+  poster: { borderRadius: 10, marginBottom: 6 },
   cardTitle: { color: '#fff', fontSize: 12, fontWeight: '600', marginBottom: 3 },
   cardRating: { color: '#aaa', fontSize: 11 },
-  empty: { flex: 1, alignItems: 'center', justifyContent: 'center' },
-  emptyText: { color: '#aaa', fontSize: 16 },
+  empty: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 10, paddingHorizontal: 24 },
+  emptyText: { color: '#aaa', fontSize: 16, textAlign: 'center' },
+  retryBtn: { backgroundColor: '#e50914', paddingHorizontal: 24, paddingVertical: 10, borderRadius: 20, marginTop: 8 },
+  retryText: { color: '#fff', fontWeight: '700', fontSize: 14 },
 });
 
 const fStyles = StyleSheet.create({
