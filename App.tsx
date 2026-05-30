@@ -111,11 +111,11 @@ const ONBOARDING_SLIDES = [
     icon: 'sparkles' as const,
     iconBg: '#5533cc',
     title: 'ИИ-подборщик',
-    text: 'Опиши настроение или вайб словами — ИИ на базе Groq проанализирует запрос и выдаст до 40 релевантных тайтлов специально для тебя.',
+    text: 'Опиши настроение или вайб словами — ИИ проанализирует запрос и подберёт релевантные тайтлы специально для тебя, включая свежие новинки.',
     items: [
       { icon: 'mic-outline' as const, label: 'Голосовой ввод запроса' },
-      { icon: 'sparkles-outline' as const, label: 'Анализ вайба через Groq AI' },
-      { icon: 'grid-outline' as const, label: 'До 40 уникальных результатов' },
+      { icon: 'sparkles-outline' as const, label: 'Анализ вайба + веб-поиск новинок' },
+      { icon: 'grid-outline' as const, label: 'Десятки релевантных результатов' },
     ],
   },
   {
@@ -204,6 +204,17 @@ function AppTabs() {
         }}
       >
         <Tab.Screen
+          name="Mood"
+          component={MoodStackScreen}
+          options={{
+            tabBarLabel: 'ИИ',
+            tabBarIcon: ({ focused, color }) => (
+              <TabIcon name={focused ? 'sparkles' : 'sparkles-outline'} focused={focused} color={color} />
+            ),
+          }}
+        />
+
+        <Tab.Screen
           name="Catalog"
           component={CatalogStackScreen}
           options={{
@@ -221,17 +232,6 @@ function AppTabs() {
             tabBarLabel: 'Топ',
             tabBarIcon: ({ focused, color }) => (
               <TabIcon name={focused ? 'trophy' : 'trophy-outline'} focused={focused} color={color} />
-            ),
-          }}
-        />
-
-        <Tab.Screen
-          name="Mood"
-          component={MoodStackScreen}
-          options={{
-            tabBarLabel: 'ИИ',
-            tabBarIcon: ({ focused, color }) => (
-              <TabIcon name={focused ? 'sparkles' : 'sparkles-outline'} focused={focused} color={color} />
             ),
           }}
         />

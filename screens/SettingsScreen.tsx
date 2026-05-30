@@ -93,7 +93,7 @@ export default function SettingsScreen() {
             </View>
             <View style={styles.infoRow}>
               <Ionicons name="sparkles-outline" size={16} color="#888" />
-              <Text style={styles.infoText}>ИИ-подборщик: Groq / Gemini</Text>
+              <Text style={styles.infoText}>ИИ-подборщик: Groq Compound</Text>
             </View>
           </View>
         </View>

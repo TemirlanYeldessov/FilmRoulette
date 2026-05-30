@@ -51,6 +51,10 @@ function toSlimMovie(movie: any) {
 
 export function AppProvider({ children }: { children: React.ReactNode }) {
   const [hydrated, setHydrated] = useState(false);
+  // Whether the initial read actually succeeded. If it failed (rare storage
+  // error), we still release the UI but must never run the persist effects —
+  // otherwise the empty in-memory defaults would overwrite real saved data.
+  const [canPersist, setCanPersist] = useState(false);
   const [adultContent, setAdultContent] = useState(false);
   const [watchlist, setWatchlist] = useState<any[]>([]);
   const [userRatings, setUserRatingsState] = useState<Record<string, UserMovieStatus>>({});
@@ -76,6 +80,10 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         setUserRatingsState(safeParse(ratings, {}));
         setRecentRandomIds(safeParse(recent, []));
         setOnboardingSeen(onboarding === 'true');
+        if (mounted) setCanPersist(true);
+      } catch {
+        // Read failed — release the UI but leave canPersist false so the
+        // persist effects below never clobber existing data with defaults.
       } finally {
         if (mounted) setHydrated(true);
       }
@@ -86,29 +94,29 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   // Persist effects — only after hydration to avoid clobbering existing data
   // with the initial in-memory defaults.
   useEffect(() => {
-    if (!hydrated) return;
+    if (!canPersist) return;
     AsyncStorage.setItem('adultContent', String(adultContent));
-  }, [adultContent, hydrated]);
+  }, [adultContent, canPersist]);
 
   useEffect(() => {
-    if (!hydrated) return;
+    if (!canPersist) return;
     AsyncStorage.setItem('watchlist', JSON.stringify(watchlist));
-  }, [watchlist, hydrated]);
+  }, [watchlist, canPersist]);
 
   useEffect(() => {
-    if (!hydrated) return;
+    if (!canPersist) return;
     AsyncStorage.setItem('userRatings', JSON.stringify(userRatings));
-  }, [userRatings, hydrated]);
+  }, [userRatings, canPersist]);
 
   useEffect(() => {
-    if (!hydrated) return;
+    if (!canPersist) return;
     AsyncStorage.setItem('recentRandomIds', JSON.stringify(recentRandomIds));
-  }, [recentRandomIds, hydrated]);
+  }, [recentRandomIds, canPersist]);
 
   useEffect(() => {
-    if (!hydrated) return;
+    if (!canPersist) return;
     AsyncStorage.setItem('onboardingSeen', String(onboardingSeen));
-  }, [onboardingSeen, hydrated]);
+  }, [onboardingSeen, canPersist]);
 
   const toggleAdultContent = () => {
     if (!hydrated) return;
@@ -130,6 +138,15 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const removeFromWatchlist = (id: number, mediaType: string) => {
     if (!hydrated) return;
     setWatchlist(prev => prev.filter(m => !(m.id === id && m.mediaType === mediaType)));
+    // Drop the rating too, so it doesn't linger orphaned in storage and keep
+    // showing a "seen" mark on grids after the title left the collection.
+    setUserRatingsState(prev => {
+      const key = keyForMovie(id, mediaType);
+      if (!(key in prev)) return prev;
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
   };
 
   const isInWatchlist = (id: number, mediaType: string) => {

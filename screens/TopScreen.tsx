@@ -20,6 +20,7 @@ import { MovieCardSkeleton } from '../components/Skeleton';
 import PaginationBar from '../components/PaginationBar';
 import CardMark from '../components/CardMark';
 import { getCached, setCached, LIST_TTL } from '../utils/apiCache';
+import { dedup, itemToMovie } from '../utils/tmdb';
 import { TMDB_TOKEN as TOKEN } from '../constants/api';
 
 const MEDIA_TABS = [
@@ -118,7 +119,7 @@ async function fetchItems(mediaType: string, category: string, page: number) {
   const res = await fetchWithTimeout(url, { headers: { Authorization: `Bearer ${TOKEN}` } });
   const data = await res.json();
   const result = {
-    results: (data.results || []).filter((m: any) => m.poster_path),
+    results: dedup((data.results || []).filter((m: any) => m.poster_path), mediaType),
     totalPages: Math.min(data.total_pages || 1, 500),
     totalResults: data.total_results || 0,
   };
@@ -133,7 +134,7 @@ async function searchItems(query: string, mediaType: string, adultContent: boole
   );
   const data = await res.json();
   return {
-    results: (data.results || []).filter((m: any) => m.poster_path).map((m: any) => ({ ...m, media_type: mediaType })),
+    results: dedup((data.results || []).filter((m: any) => m.poster_path).map((m: any) => ({ ...m, media_type: mediaType })), mediaType),
     totalPages: Math.min(data.total_pages || 1, 500),
     totalResults: data.total_results || 0,
   };
@@ -153,27 +154,9 @@ async function discoverWithFilters(mediaType: string, filters: any, adultContent
   const res = await fetchWithTimeout(url, { headers: { Authorization: `Bearer ${TOKEN}` } });
   const data = await res.json();
   return {
-    results: (data.results || []).filter((m: any) => m.poster_path).map((m: any) => ({ ...m, media_type: mediaType })),
+    results: dedup((data.results || []).filter((m: any) => m.poster_path).map((m: any) => ({ ...m, media_type: mediaType })), mediaType),
     totalPages: Math.min(data.total_pages || 1, 500),
     totalResults: data.total_results || 0,
-  };
-}
-
-function itemToMovie(item: any, fallbackType: string) {
-  const type = item.media_type || fallbackType;
-  return {
-    id: item.id,
-    titleRu: item.title || item.name || '',
-    titleEn: item.title || item.name || '',
-    overview: item.overview || '',
-    poster: item.poster_path ? `https://image.tmdb.org/t/p/w500${item.poster_path}` : null,
-    trailerKey: null,
-    mediaType: type,
-    rating: item.vote_average > 0 ? item.vote_average.toFixed(1) : null,
-    year: (item.release_date || item.first_air_date || '').slice(0, 4),
-    country: null,
-    genres: null,
-    genreId: null,
   };
 }
 
@@ -401,7 +384,7 @@ export default function TopScreen({ navigation }: any) {
             <TextInput
               style={styles.searchInput}
               placeholder="Поиск в топе..."
-              placeholderTextColor="#555"
+              placeholderTextColor="#777"
               value={searchQuery}
               onChangeText={setSearchQuery}
               returnKeyType="search"
@@ -457,7 +440,7 @@ export default function TopScreen({ navigation }: any) {
         <FlatList
           ref={listRef}
           data={items}
-          keyExtractor={(item, index) => `${item.id}-${index}`}
+          keyExtractor={(item) => `${item.media_type || mediaType}-${item.id}`}
           numColumns={2}
           contentContainerStyle={styles.grid}
           columnWrapperStyle={styles.row}
@@ -475,7 +458,7 @@ export default function TopScreen({ navigation }: any) {
                     <Text style={styles.rankText}>#{rank}</Text>
                   </View>
                 )}
-                <CardMark id={item.id} mediaType={item.media_type || mediaType} />
+                <CardMark movie={itemToMovie(item, mediaType)} />
                 <Image
                   source={{ uri: `https://image.tmdb.org/t/p/w300${item.poster_path}` }}
                   style={[styles.poster, { width: cardWidth, height: cardWidth * 1.5 }]}
@@ -484,7 +467,7 @@ export default function TopScreen({ navigation }: any) {
                   cachePolicy="memory-disk"
                 />
                 <Text style={styles.cardTitle} numberOfLines={2}>{item.title || item.name}</Text>
-                {item.vote_average > 0 && <Text style={styles.cardRating}>⭐ {item.vote_average.toFixed(1)}</Text>}
+                {item.vote_average > 0 && <Text style={styles.cardRating}>★ {item.vote_average.toFixed(1)}</Text>}
               </TouchableOpacity>
             );
           }}
@@ -519,9 +502,9 @@ export default function TopScreen({ navigation }: any) {
 
               <Text style={fStyles.label}>Год выпуска</Text>
               <View style={fStyles.yearRow}>
-                <TextInput style={fStyles.yearInput} placeholder="От" placeholderTextColor="#555" value={localFilters.yearFrom} onChangeText={v => setLocalFilters(f => ({ ...f, yearFrom: v }))} keyboardType="numeric" maxLength={4} />
+                <TextInput style={fStyles.yearInput} placeholder="От" placeholderTextColor="#777" value={localFilters.yearFrom} onChangeText={v => setLocalFilters(f => ({ ...f, yearFrom: v }))} keyboardType="numeric" maxLength={4} />
                 <Text style={fStyles.yearDash}>-</Text>
-                <TextInput style={fStyles.yearInput} placeholder="До" placeholderTextColor="#555" value={localFilters.yearTo} onChangeText={v => setLocalFilters(f => ({ ...f, yearTo: v }))} keyboardType="numeric" maxLength={4} />
+                <TextInput style={fStyles.yearInput} placeholder="До" placeholderTextColor="#777" value={localFilters.yearTo} onChangeText={v => setLocalFilters(f => ({ ...f, yearTo: v }))} keyboardType="numeric" maxLength={4} />
               </View>
 
               <Text style={fStyles.label}>Язык оригинала</Text>

@@ -19,6 +19,7 @@ import {
 import YoutubePlayer from 'react-native-youtube-iframe';
 import { MovieDetailSkeleton } from '../components/Skeleton';
 import { useAppContext, UserMovieStatus } from '../store/AppContext';
+import { dedup, itemToMovie } from '../utils/tmdb';
 import { TMDB_TOKEN as TOKEN } from '../constants/api';
 
 const relatedPosterWidth = 104;
@@ -92,26 +93,6 @@ async function fetchWithTimeout(url: string, options: any = {}, timeout = 10000)
   }
 }
 
-async function getTrailer(id: number, type: string) {
-  try {
-    const resRu = await fetchWithTimeout(
-      `https://api.themoviedb.org/3/${type}/${id}/videos?language=ru-RU`,
-      { headers: { Authorization: `Bearer ${TOKEN}` } }
-    );
-    const dataRu = await resRu.json();
-    const trailerRu = dataRu.results?.find((v: any) => v.type === 'Trailer' && v.site === 'YouTube');
-    if (trailerRu) return trailerRu.key;
-    const resEn = await fetchWithTimeout(
-      `https://api.themoviedb.org/3/${type}/${id}/videos?language=en-US`,
-      { headers: { Authorization: `Bearer ${TOKEN}` } }
-    );
-    const dataEn = await resEn.json();
-    return dataEn.results?.find((v: any) => v.type === 'Trailer' && v.site === 'YouTube')?.key || null;
-  } catch {
-    return null;
-  }
-}
-
 function getCertification(data: any, type: string) {
   if (type === 'movie') {
     const ru = data.release_dates?.results?.find((r: any) => r.iso_3166_1 === 'RU');
@@ -128,17 +109,7 @@ function getProviders(data: any) {
   const region = data['watch/providers']?.results?.RU || data['watch/providers']?.results?.US;
   const providers = [...(region?.flatrate || []), ...(region?.rent || []), ...(region?.buy || [])];
   const unique = new Map(providers.map((p: any) => [p.provider_id, p]));
-  return Array.from(unique.values()).slice(0, 8);
-}
-
-function dedup(items: any[]): any[] {
-  const seen = new Set<string>();
-  return items.filter(item => {
-    const key = `${item.media_type || ''}-${item.id}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
+  return Array.from(unique.values());
 }
 
 function normalizeRelated(items: any[], type: string) {
@@ -184,10 +155,10 @@ async function fetchFullDetails(id: number, type: string, signal?: AbortSignal) 
     runtime: type === 'movie' ? ruData.runtime : ruData.episode_run_time?.[0],
     seasons: ruData.number_of_seasons,
     ageRating: getCertification(ruData, type),
-    cast: ruData.credits?.cast?.slice(0, 8) || [],
+    cast: ruData.credits?.cast || [],
     creators:
       type === 'movie'
-        ? ruData.credits?.crew?.filter((p: any) => p.job === 'Director').slice(0, 3) || []
+        ? ruData.credits?.crew?.filter((p: any) => p.job === 'Director') || []
         : ruData.created_by || [],
     providers: getProviders(ruData),
     recommendations,
@@ -279,13 +250,16 @@ export default function MovieScreen({ route, navigation }: any) {
   const activePreciseFilters = movie.preciseFilters || route.params?.preciseFilters || defaultPreciseFilters;
   const activeRandomGenres = movie.selectedGenres || (movie.genreId ? [movie.genreId] : [0]);
 
-  // Initialize related items when movie changes
+  // Initialize related items when the movie changes OR when recommendations
+  // arrive via hydration. Depending on movie.id alone misses the hydrate case:
+  // a card opened "thin" (catalog/AI/search) keeps the same id while details
+  // load, so "Похожие" would never populate on first open — only on reroll.
   useEffect(() => {
     const recs = movie.recommendations || [];
     setRelatedItems(recs);
     setRelatedPage(1);
     setRelatedHasMore((movie.recommendationsTotalPages || 1) > 1);
-  }, [movie.id]);
+  }, [movie.id, movie.recommendations]);
 
   useEffect(() => {
     return () => {
@@ -405,22 +379,10 @@ export default function MovieScreen({ route, navigation }: any) {
   };
 
   const openRelated = (item: any) => {
-    navigation.navigate('Card', {
-      movie: {
-        id: item.id,
-        titleRu: item.title || item.name || '',
-        titleEn: item.title || item.name || '',
-        overview: item.overview || '',
-        poster: item.poster_path ? `https://image.tmdb.org/t/p/w500${item.poster_path}` : null,
-        trailerKey: null,
-        mediaType: item.media_type || movie.mediaType,
-        rating: item.vote_average > 0 ? item.vote_average.toFixed(1) : null,
-        year: (item.release_date || item.first_air_date || '').slice(0, 4),
-        country: null,
-        genres: null,
-        genreId: null,
-      },
-    });
+    // push (not navigate): navigating to 'Card' from 'Card' would just update
+    // the current screen's params, which MovieScreen ignores (movie is seeded
+    // from route.params once). push mounts a fresh detail screen each time.
+    navigation.push('Card', { movie: itemToMovie(item, movie.mediaType) });
   };
 
   if (skeletonVisible) {
@@ -536,7 +498,7 @@ export default function MovieScreen({ route, navigation }: any) {
                 <TouchableOpacity
                   key={p.id}
                   style={styles.castChip}
-                  onPress={() => navigation.navigate('Actor', { personId: p.id, name: p.name })}
+                  onPress={() => navigation.push('Actor', { personId: p.id, name: p.name })}
                 >
                   <Text style={styles.castChipText}>{p.name}</Text>
                 </TouchableOpacity>

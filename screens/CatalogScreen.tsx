@@ -19,6 +19,7 @@ import {
 import PaginationBar from '../components/PaginationBar';
 import CardMark from '../components/CardMark';
 import { getCached, setCached, LIST_TTL } from '../utils/apiCache';
+import { dedup, itemToMovie } from '../utils/tmdb';
 import { HorizontalCardSkeleton, MovieCardSkeleton } from '../components/Skeleton';
 import { useAppContext } from '../store/AppContext';
 import { TMDB_TOKEN as TOKEN } from '../constants/api';
@@ -181,54 +182,6 @@ async function fetchWithTimeout(url: string, options: any = {}, timeout = 10000)
   }
 }
 
-function dedup(items: any[]): any[] {
-  const seen = new Set<string>();
-  return items.filter(item => {
-    const key = `${item.media_type || ''}-${item.id}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-}
-
-function itemToMovie(item: any, fallbackType: string) {
-  const type = item.media_type || fallbackType;
-  return {
-    id: item.id,
-    titleRu: item.title || item.name || '',
-    titleEn: item.title || item.name || '',
-    overview: item.overview || '',
-    poster: item.poster_path ? `https://image.tmdb.org/t/p/w500${item.poster_path}` : null,
-    trailerKey: null,
-    mediaType: type,
-    rating: item.vote_average > 0 ? item.vote_average.toFixed(1) : null,
-    year: (item.release_date || item.first_air_date || '').slice(0, 4),
-    country: null,
-    genres: null,
-    genreId: null,
-  };
-}
-
-async function getTrailer(id: number, type: string) {
-  try {
-    const resRu = await fetchWithTimeout(
-      `https://api.themoviedb.org/3/${type}/${id}/videos?language=ru-RU`,
-      { headers: { Authorization: `Bearer ${TOKEN}` } }
-    );
-    const dataRu = await resRu.json();
-    const trailerRu = dataRu.results?.find((v: any) => v.type === 'Trailer' && v.site === 'YouTube');
-    if (trailerRu) return trailerRu.key;
-    const resEn = await fetchWithTimeout(
-      `https://api.themoviedb.org/3/${type}/${id}/videos?language=en-US`,
-      { headers: { Authorization: `Bearer ${TOKEN}` } }
-    );
-    const dataEn = await resEn.json();
-    return dataEn.results?.find((v: any) => v.type === 'Trailer' && v.site === 'YouTube')?.key || null;
-  } catch {
-    return null;
-  }
-}
-
 async function fetchDetails(id: number, type: string) {
   const [ruRes, enRes] = await Promise.all([
     fetchWithTimeout(`https://api.themoviedb.org/3/${type}/${id}?language=ru-RU&append_to_response=videos`, {
@@ -307,8 +260,10 @@ async function searchItems(query: string, adultContent: boolean, page = 1) {
     { headers: { Authorization: `Bearer ${TOKEN}` } }
   );
   const data = await res.json();
-  const results = (data.results || []).filter(
-    (m: any) => (m.media_type === 'movie' || m.media_type === 'tv') && m.poster_path
+  const results = dedup(
+    (data.results || []).filter(
+      (m: any) => (m.media_type === 'movie' || m.media_type === 'tv') && m.poster_path
+    )
   );
   return {
     results,
@@ -364,7 +319,16 @@ async function discoverItems(filters: any, adultContent: boolean, page = 1) {
     };
   });
 
-  const typed = await Promise.all(requests);
+  // allSettled: when "all" is selected, one media type failing shouldn't wipe
+  // out the other's results. Only error out if both failed.
+  const settled = await Promise.allSettled(requests);
+  const typed = settled
+    .filter((r): r is PromiseFulfilledResult<any> => r.status === 'fulfilled')
+    .map(r => r.value);
+  if (typed.length === 0) {
+    const firstRejected = settled.find(r => r.status === 'rejected') as PromiseRejectedResult | undefined;
+    throw firstRejected?.reason || new Error('Не удалось загрузить.');
+  }
   const merged = sortMerged(
     dedup(typed.flatMap(t => t.results)),
     filters.sortBy || 'popularity.desc'
@@ -399,7 +363,8 @@ function FilterSheet({ visible, onClose, filters, onApply }: any) {
       <TouchableOpacity style={fStyles.overlay} activeOpacity={1} onPress={requestClose}>
         <TouchableOpacity activeOpacity={1} style={fStyles.sheet}>
           <View style={fStyles.handle} />
-          <Text style={fStyles.title}>Фильтры</Text>
+          <Text style={fStyles.title}>Фильтры поиска</Text>
+          <Text style={fStyles.caption}>Применяются к поиску и каталогу — не к рулетке</Text>
           <ScrollView showsVerticalScrollIndicator={false}>
             <Text style={fStyles.label}>Тип контента</Text>
             <ScrollView horizontal showsHorizontalScrollIndicator={false}>
@@ -436,9 +401,9 @@ function FilterSheet({ visible, onClose, filters, onApply }: any) {
 
             <Text style={fStyles.label}>Год выпуска</Text>
             <View style={fStyles.yearRow}>
-              <TextInput style={fStyles.yearInput} placeholder="От" placeholderTextColor="#555" value={local.yearFrom} onChangeText={v => setLocal({ ...local, yearFrom: v })} keyboardType="numeric" maxLength={4} />
+              <TextInput style={fStyles.yearInput} placeholder="От" placeholderTextColor="#777" value={local.yearFrom} onChangeText={v => setLocal({ ...local, yearFrom: v })} keyboardType="numeric" maxLength={4} />
               <Text style={fStyles.yearDash}>-</Text>
-              <TextInput style={fStyles.yearInput} placeholder="До" placeholderTextColor="#555" value={local.yearTo} onChangeText={v => setLocal({ ...local, yearTo: v })} keyboardType="numeric" maxLength={4} />
+              <TextInput style={fStyles.yearInput} placeholder="До" placeholderTextColor="#777" value={local.yearTo} onChangeText={v => setLocal({ ...local, yearTo: v })} keyboardType="numeric" maxLength={4} />
             </View>
 
             <Text style={fStyles.label}>Минимальный рейтинг</Text>
@@ -662,10 +627,12 @@ export default function CatalogScreen({ navigation }: any) {
     setError('');
 
     const timer = setTimeout(async () => {
+      // Record the query up-front (not just on success) so the retry button in
+      // the error state knows to re-run a text search rather than a discover.
+      lastQueryRef.current = q;
       try {
         const { results, totalPages: tp, totalResults: tr } = await searchItems(q, adultContent, 1);
         if (searchRequestRef.current === requestId) {
-          lastQueryRef.current = q;
           setSearchResults(results);
           setCurrentPage(1);
           setTotalPages(tp);
@@ -696,6 +663,8 @@ export default function CatalogScreen({ navigation }: any) {
     setCurrentPage(1);
     setTotalPages(1);
     setTotalResults(0);
+    lastQueryRef.current = '';
+    activeFiltersRef.current = defaultFilters;
   };
 
   const handleFilterSearch = async (rawF: any) => {
@@ -831,7 +800,7 @@ export default function CatalogScreen({ navigation }: any) {
             <TextInput
               style={styles.searchInput}
               placeholder="Поиск фильмов и сериалов..."
-              placeholderTextColor="#555"
+              placeholderTextColor="#777"
               value={searchQuery}
               onChangeText={setSearchQuery}
               returnKeyType="search"
@@ -873,6 +842,9 @@ export default function CatalogScreen({ navigation }: any) {
             <View style={styles.empty}>
               <Ionicons name="cloud-offline-outline" size={38} color="#555" />
               <Text style={styles.emptyText}>{error}</Text>
+              <TouchableOpacity style={styles.searchRetryBtn} onPress={() => handlePageChange(currentPage)}>
+                <Text style={styles.searchRetryText}>Повторить</Text>
+              </TouchableOpacity>
             </View>
           ) : searchResults.length === 0 ? (
             <View style={styles.empty}>
@@ -884,7 +856,7 @@ export default function CatalogScreen({ navigation }: any) {
             <FlatList
               ref={resultsListRef}
               data={searchResults}
-              keyExtractor={(item, i) => `${item.id}-${item.media_type || mediaType}-${i}`}
+              keyExtractor={(item) => `${item.media_type || mediaType}-${item.id}`}
               numColumns={2}
               contentContainerStyle={styles.grid}
               columnWrapperStyle={styles.row}
@@ -893,7 +865,7 @@ export default function CatalogScreen({ navigation }: any) {
                   <View style={styles.typeBadge}>
                     <Text style={styles.typeBadgeText}>{item.media_type === 'tv' ? 'Сериал' : 'Фильм'}</Text>
                   </View>
-                  <CardMark id={item.id} mediaType={item.media_type || mediaType} />
+                  <CardMark movie={itemToMovie(item, mediaType)} />
                   <Image
                     source={{ uri: `https://image.tmdb.org/t/p/w300${item.poster_path}` }}
                     style={[styles.poster, { width: cardWidth, height: cardWidth * 1.5 }]}
@@ -994,12 +966,12 @@ export default function CatalogScreen({ navigation }: any) {
               data={trending}
               horizontal
               showsHorizontalScrollIndicator={false}
-              keyExtractor={item => `${item.id}`}
+              keyExtractor={item => `${item.media_type || mediaType}-${item.id}`}
               onEndReached={loadMoreTrending}
               onEndReachedThreshold={0.6}
               renderItem={({ item }) => (
                 <TouchableOpacity onPress={() => openCard(item)} style={styles.trendCard}>
-                  <CardMark id={item.id} mediaType={item.media_type || mediaType} />
+                  <CardMark movie={itemToMovie(item, mediaType)} />
                   <Image
                     source={{ uri: `https://image.tmdb.org/t/p/w300${item.poster_path}` }}
                     style={styles.trendImage}
@@ -1030,9 +1002,9 @@ export default function CatalogScreen({ navigation }: any) {
             <ScrollView showsVerticalScrollIndicator={false}>
               <Text style={fStyles.label}>Год выпуска</Text>
               <View style={fStyles.yearRow}>
-                <TextInput style={fStyles.yearInput} placeholder="От" placeholderTextColor="#555" value={localPreciseFilters.yearFrom} onChangeText={v => setLocalPreciseFilters(p => ({ ...p, yearFrom: v }))} keyboardType="numeric" maxLength={4} />
+                <TextInput style={fStyles.yearInput} placeholder="От" placeholderTextColor="#777" value={localPreciseFilters.yearFrom} onChangeText={v => setLocalPreciseFilters(p => ({ ...p, yearFrom: v }))} keyboardType="numeric" maxLength={4} />
                 <Text style={fStyles.yearDash}>-</Text>
-                <TextInput style={fStyles.yearInput} placeholder="До" placeholderTextColor="#555" value={localPreciseFilters.yearTo} onChangeText={v => setLocalPreciseFilters(p => ({ ...p, yearTo: v }))} keyboardType="numeric" maxLength={4} />
+                <TextInput style={fStyles.yearInput} placeholder="До" placeholderTextColor="#777" value={localPreciseFilters.yearTo} onChangeText={v => setLocalPreciseFilters(p => ({ ...p, yearTo: v }))} keyboardType="numeric" maxLength={4} />
               </View>
 
               <Text style={fStyles.label}>Минимальный рейтинг</Text>
@@ -1130,6 +1102,8 @@ const styles = StyleSheet.create({
   empty: { flex: 1, alignItems: 'center', paddingTop: 80, paddingHorizontal: 24 },
   emptyText: { color: '#aaa', fontSize: 16, textAlign: 'center', marginTop: 10 },
   emptyHint: { color: '#555', fontSize: 13, textAlign: 'center', marginTop: 6 },
+  searchRetryBtn: { backgroundColor: '#e50914', paddingHorizontal: 24, paddingVertical: 10, borderRadius: 20, marginTop: 14 },
+  searchRetryText: { color: '#fff', fontWeight: '700', fontSize: 14 },
   trendingErrorBox: { backgroundColor: '#2a0a0a', borderRadius: 12, padding: 14, marginBottom: 8, alignItems: 'center', gap: 8 },
   trendingErrorText: { color: '#e50914', fontSize: 13, textAlign: 'center' },
   trendingRetry: { color: '#fff', fontSize: 13, fontWeight: '700' },
@@ -1139,7 +1113,8 @@ const fStyles = StyleSheet.create({
   overlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'flex-end' },
   sheet: { backgroundColor: '#1a1a2e', borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 24, paddingBottom: 40, maxHeight: '85%' },
   handle: { width: 40, height: 4, backgroundColor: '#444', borderRadius: 2, alignSelf: 'center', marginBottom: 20 },
-  title: { fontSize: 20, fontWeight: 'bold', color: '#fff', marginBottom: 20 },
+  title: { fontSize: 20, fontWeight: 'bold', color: '#fff', marginBottom: 6 },
+  caption: { color: '#888', fontSize: 12, marginBottom: 14 },
   label: { color: '#aaa', fontSize: 13, marginBottom: 8, marginTop: 16 },
   chipRow: { flexDirection: 'row', gap: 8, paddingBottom: 4 },
   chip: { paddingHorizontal: 14, paddingVertical: 8, borderRadius: 16, borderWidth: 1, borderColor: '#333' },

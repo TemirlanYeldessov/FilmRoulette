@@ -22,9 +22,12 @@ import {
 } from 'expo-speech-recognition';
 import { useAppContext } from '../store/AppContext';
 import CardMark from '../components/CardMark';
-import { TMDB_TOKEN, GROQ_KEY, GEMINI_KEY } from '../constants/api';
+import { MovieCardSkeleton } from '../components/Skeleton';
+import { itemToMovie } from '../utils/tmdb';
+import { TMDB_TOKEN, GROQ_KEY } from '../constants/api';
 
 const RESOLVE_CONCURRENCY = 6;
+const SKELETON_KEYS = [0, 1, 2, 3, 4, 5];
 
 const ALL_SUGGESTIONS = [
   'Молодёжные комедии с пляжем и тусовками',
@@ -132,7 +135,6 @@ function extractJsonObject(raw: string): string | null {
 
 type GroqResult = {
   mediaTypeFilter: 'movie' | 'tv' | 'mixed';
-  reason: string;
   titles: string[];
 };
 
@@ -146,8 +148,7 @@ function normalizeGroqResult(parsed: any): GroqResult {
   if (titles.length === 0) {
     throw new Error('ИИ не вернул ни одного названия. Попробуй переформулировать запрос.');
   }
-  const reason = typeof parsed?.reason === 'string' ? parsed.reason : '';
-  return { mediaTypeFilter, reason, titles };
+  return { mediaTypeFilter, titles };
 }
 
 function normalizeTitle(value: string) {
@@ -197,103 +198,52 @@ function buildAiPrompt(mood: string) {
 - Если в запросе есть слова "сериал", "шоу", "series", "сезон" → mediaTypeFilter = "tv" (только сериалы)
 - Если тип не указан явно → mediaTypeFilter = "mixed" (можно вперемешку)
 
-Подбери 40 конкретных названий которые МАКСИМАЛЬНО точно соответствуют запросу.
+Подбери как можно больше названий, которые МАКСИМАЛЬНО точно соответствуют запросу — не ограничивай себя искусственно. Ориентир 50-60, но если реально подходящих больше — давай больше; если запрос узкий и хороших мало — лучше меньше, но без воды и случайных тайтлов.
 
 Критерии:
 - Соблюдай mediaTypeFilter строго
 - Подбирай по атмосфере, вайбу, элементам которые упомянул пользователь
 - Только реально существующие фильмы/сериалы
-- Разнообразие годов; если уместно — добавь свежие релизы последних 1-2 лет
-- Без повторений
+- Разнообразие годов; обязательно добавь свежие релизы 2025–2026 (проверь актуальные новинки через веб-поиск, если он доступен)
+- Без повторений, только уникальные названия
 
 Ответь ТОЛЬКО в формате JSON без markdown:
 {
   "mediaTypeFilter": "movie" | "tv" | "mixed",
-  "reason": "1-2 предложения почему эти тайтлы подходят",
   "titles": ["English Title 1", "English Title 2", ...]
 }
 
-Все названия на английском. Ровно 40 уникальных названий.`;
+Все названия на английском. Качество и релевантность важнее круглого числа.`;
 }
 
-// Gemini with Google Search grounding — knows fresh releases the offline LLM
-// can't. Used when EXPO_PUBLIC_GEMINI_KEY is set; otherwise we use Groq.
-async function askGemini(mood: string, signal?: AbortSignal): Promise<GroqResult> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 35000);
-  const onExternalAbort = () => controller.abort();
-  if (signal) {
-    if (signal.aborted) controller.abort();
-    else signal.addEventListener('abort', onExternalAbort);
-  }
-  let res: Response;
-  try {
-    res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_KEY}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [{ role: 'user', parts: [{ text: buildAiPrompt(mood) }] }],
-          tools: [{ google_search: {} }],
-          generationConfig: { temperature: 0.6 },
-        }),
-        signal: controller.signal,
-      }
-    );
-  } catch (e: any) {
-    if (e?.name === 'AbortError') {
-      if (signal?.aborted) throw e;
-      throw new Error('ИИ не отвечает. Проверь интернет.');
-    }
-    throw e;
-  } finally {
-    clearTimeout(timer);
-    if (signal) signal.removeEventListener('abort', onExternalAbort);
-  }
-
-  if (!res.ok) {
-    if (res.status === 429) throw new Error('ИИ перегружен. Попробуй через минуту.');
-    throw new Error('ИИ временно недоступен. Попробуй ещё раз.');
-  }
-
-  const data = await res.json();
-  const text = (data.candidates?.[0]?.content?.parts || [])
-    .map((p: any) => p.text || '')
-    .join('');
-
-  if (!text) throw new Error('ИИ вернул пустой ответ. Попробуй ещё раз.');
-
-  const jsonText = extractJsonObject(text);
-  if (!jsonText) throw new Error('Не удалось распознать ответ ИИ. Попробуй ещё раз.');
-
-  let parsed: any;
-  try {
-    parsed = JSON.parse(jsonText);
-  } catch {
-    throw new Error('Не удалось распознать ответ ИИ. Попробуй ещё раз.');
-  }
-  return normalizeGroqResult(parsed);
-}
-
-// Prefer Gemini (live web → fresh releases); fall back to Groq on failure.
+// Prefer Groq Compound — an agentic system with built-in web search, so it
+// knows fresh releases the offline model can't. Fall back to the plain Llama
+// model if Compound is unavailable, rate-limited, or returns garbled JSON.
 async function askAI(mood: string, signal?: AbortSignal): Promise<GroqResult> {
-  if (GEMINI_KEY) {
-    try {
-      return await askGemini(mood, signal);
-    } catch (e: any) {
-      if (e?.name === 'AbortError' || !GROQ_KEY) throw e;
-      return await askGroq(mood, signal);
-    }
+  try {
+    return await askGroq(mood, signal, 'groq/compound-mini');
+  } catch (e: any) {
+    if (e?.name === 'AbortError') throw e;
+    return await askGroq(mood, signal, 'llama-3.3-70b-versatile');
   }
-  return await askGroq(mood, signal);
 }
 
-async function askGroq(mood: string, signal?: AbortSignal): Promise<GroqResult> {
+async function askGroq(
+  mood: string,
+  signal?: AbortSignal,
+  model = 'llama-3.3-70b-versatile'
+): Promise<GroqResult> {
   const prompt = buildAiPrompt(mood);
+  // Compound runs a live web search before answering, so give it more time and
+  // token headroom for the extra reasoning that precedes the JSON.
+  const isCompound = model.startsWith('groq/compound');
+  const timeoutMs = isCompound ? 40000 : 30000;
+  // Headroom for a larger, uncapped title list (plus Compound's pre-answer
+  // reasoning), so the JSON isn't truncated mid-array.
+  const maxTokens = isCompound ? 4000 : 3000;
 
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 30000);
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   const onExternalAbort = () => controller.abort();
   if (signal) {
     if (signal.aborted) controller.abort();
@@ -308,10 +258,10 @@ async function askGroq(mood: string, signal?: AbortSignal): Promise<GroqResult> 
         Authorization: `Bearer ${GROQ_KEY}`,
       },
       body: JSON.stringify({
-        model: 'llama-3.3-70b-versatile',
+        model,
         messages: [{ role: 'user', content: prompt }],
         temperature: 0.5,
-        max_tokens: 1500,
+        max_tokens: maxTokens,
       }),
       signal: controller.signal,
     });
@@ -372,63 +322,41 @@ async function searchTitle(title: string, adultContent: boolean, mediaTypeFilter
     null;
 }
 
-async function fetchDetails(id: number, type: string, signal?: AbortSignal) {
-  const [ruRes, enRes] = await Promise.all([
-    fetchWithTimeout(`https://api.themoviedb.org/3/${type}/${id}?language=ru-RU&append_to_response=videos`, {
-      headers: { Authorization: `Bearer ${TMDB_TOKEN}` }, signal,
-    }),
-    fetchWithTimeout(`https://api.themoviedb.org/3/${type}/${id}?language=en-US&append_to_response=videos`, {
-      headers: { Authorization: `Bearer ${TMDB_TOKEN}` }, signal,
-    }),
-  ]);
-
-  const ruData = await ruRes.json();
-  const enData = await enRes.json();
-  const trailerRu = ruData.videos?.results?.find((v: any) => v.type === 'Trailer' && v.site === 'YouTube');
-  const trailerEn = enData.videos?.results?.find((v: any) => v.type === 'Trailer' && v.site === 'YouTube');
-
-  return {
-    id,
-    titleRu: ruData.title || ruData.name,
-    titleEn: enData.title || enData.name,
-    overview: ruData.overview || enData.overview,
-    poster: ruData.poster_path ? `https://image.tmdb.org/t/p/w500${ruData.poster_path}` : null,
-    trailerKey: trailerRu?.key || trailerEn?.key || null,
-    genreId: null,
-    mediaType: type,
-    rating: ruData.vote_average ? ruData.vote_average.toFixed(1) : null,
-    year: (ruData.release_date || ruData.first_air_date || '').slice(0, 4),
-    country: ruData.production_countries?.[0]?.name || null,
-    genres: ruData.genres?.map((g: any) => g.name).join(', ') || null,
-  };
-}
-
 export default function MoodScreen({ navigation }: any) {
   const { adultContent } = useAppContext();
   const { width } = useWindowDimensions();
   const cardWidth = useMemo(() => (width - 48) / 2, [width]);
   const [mood, setMood] = useState('');
   const [loading, setLoading] = useState(false);
-  const [reason, setReason] = useState('');
   const [results, setResults] = useState<any[]>([]);
   const [showInput, setShowInput] = useState(true);
   const [isListening, setIsListening] = useState(false);
   const [suggestions] = useState(() => getRandomSuggestions(6));
   const [error, setError] = useState('');
-  const [opening, setOpening] = useState(false);
   const [processed, setProcessed] = useState(0);
   const [totalTitles, setTotalTitles] = useState(0);
   const restartTimerRef = useRef<any>(null);
   const findAbortRef = useRef<AbortController | null>(null);
-  const openAbortRef = useRef<AbortController | null>(null);
   // Synchronous mirror of isListening — the 'end' event from native can fire
   // before React commits the setIsListening(false) from stopListening(),
   // so reading state via closure would re-trigger the restart loop.
   const isListeningRef = useRef(false);
+  // Text committed so far across recognition segments. Each restart starts a
+  // fresh native session whose transcript resets, so we fold finalized segments
+  // in here and append the live one — otherwise long dictation overwrites
+  // itself and earlier words vanish.
+  const baseTranscriptRef = useRef('');
 
   useSpeechRecognitionEvent('result', (event) => {
     const transcript = event.results?.[0]?.transcript || '';
-    if (transcript) setMood(transcript);
+    if (!transcript) return;
+    const base = baseTranscriptRef.current;
+    const combined = base ? `${base} ${transcript}`.trim() : transcript;
+    // Show committed text + the live (interim) segment as it's spoken.
+    setMood(combined);
+    // Once a segment is finalized, fold it in so the next segment (or a
+    // recognizer restart) appends to it instead of replacing everything.
+    if (event.isFinal) baseTranscriptRef.current = combined;
   });
 
   useSpeechRecognitionEvent('end', () => {
@@ -458,7 +386,6 @@ export default function MoodScreen({ navigation }: any) {
       isListeningRef.current = false;
       if (restartTimerRef.current) clearTimeout(restartTimerRef.current);
       findAbortRef.current?.abort();
-      openAbortRef.current?.abort();
     };
   }, []);
 
@@ -477,6 +404,9 @@ export default function MoodScreen({ navigation }: any) {
       return;
     }
 
+    // Seed the accumulator with whatever's already typed so voice appends to
+    // it instead of wiping it.
+    baseTranscriptRef.current = mood.trim();
     isListeningRef.current = true;
     setIsListening(true);
     ExpoSpeechRecognitionModule.start({
@@ -509,7 +439,6 @@ export default function MoodScreen({ navigation }: any) {
 
     setLoading(true);
     setResults([]);
-    setReason('');
     setError('');
     setShowInput(false);
     setProcessed(0);
@@ -518,7 +447,6 @@ export default function MoodScreen({ navigation }: any) {
     try {
       const aiResult = await askAI(text, signal);
       if (signal.aborted) return;
-      setReason(aiResult.reason);
 
       const titles = aiResult.titles;
       setTotalTitles(titles.length);
@@ -578,30 +506,16 @@ export default function MoodScreen({ navigation }: any) {
     }
   };
 
-  const openCard = async (item: any) => {
-    if (opening) return;
-    openAbortRef.current?.abort();
-    const controller = new AbortController();
-    openAbortRef.current = controller;
-    setOpening(true);
-    try {
-      const details = await fetchDetails(item.id, item.media_type, controller.signal);
-      if (controller.signal.aborted) return;
-      navigation.navigate('Card', { movie: details });
-    } catch (e: any) {
-      if (e?.name === 'AbortError') return;
-      Alert.alert('Не удалось открыть', e?.message || 'Попробуй ещё раз.');
-    } finally {
-      if (openAbortRef.current === controller) openAbortRef.current = null;
-      setOpening(false);
-    }
+  const openCard = (item: any) => {
+    // Navigate with a thin object and let MovieScreen hydrate full details
+    // once — avoids the double fetch (here + on the detail screen).
+    navigation.navigate('Card', { movie: itemToMovie(item) });
   };
 
   const reset = () => {
     findAbortRef.current?.abort();
     setShowInput(true);
     setResults([]);
-    setReason('');
     setMood('');
     setError('');
   };
@@ -621,12 +535,6 @@ export default function MoodScreen({ navigation }: any) {
             <Ionicons name="chevron-back" size={18} color="#8888ff" />
             <Text style={styles.backBtnText}>Новый запрос</Text>
           </TouchableOpacity>
-
-          {reason ? (
-            <View style={styles.reasonBox}>
-              <Text style={styles.reasonText}>💡 {reason}</Text>
-            </View>
-          ) : null}
 
           {loading ? (
             totalTitles > 0 ? (
@@ -650,24 +558,33 @@ export default function MoodScreen({ navigation }: any) {
         </View>
 
         {loading && results.length === 0 ? (
-          <View style={styles.loadingBox}>
-            <ActivityIndicator size="large" color="#e50914" />
-            <Text style={styles.loadingText}>ИИ анализирует запрос и собирает подборку...</Text>
-          </View>
+          <FlatList
+            data={SKELETON_KEYS}
+            keyExtractor={i => String(i)}
+            numColumns={2}
+            contentContainerStyle={styles.grid}
+            columnWrapperStyle={styles.row}
+            ListHeaderComponent={
+              <Text style={[styles.loadingText, { paddingHorizontal: 12, paddingBottom: 16 }]}>
+                ИИ анализирует запрос и собирает подборку…
+              </Text>
+            }
+            renderItem={() => <MovieCardSkeleton cardWidth={cardWidth} />}
+          />
         ) : (
           <View style={{ flex: 1 }}>
             <FlatList
               data={results}
-              keyExtractor={(item, index) => `${item.id}-${item.media_type}-${index}`}
+              keyExtractor={(item) => `${item.media_type}-${item.id}`}
               numColumns={2}
               contentContainerStyle={styles.grid}
               columnWrapperStyle={styles.row}
               renderItem={({ item }) => (
-                <TouchableOpacity style={[styles.card, { width: cardWidth }]} onPress={() => openCard(item)} disabled={opening}>
+                <TouchableOpacity style={[styles.card, { width: cardWidth }]} onPress={() => openCard(item)}>
                   <View style={styles.typeBadge}>
                     <Text style={styles.typeBadgeText}>{item.media_type === 'tv' ? 'Сериал' : 'Фильм'}</Text>
                   </View>
-                  <CardMark id={item.id} mediaType={item.media_type} />
+                  <CardMark movie={itemToMovie(item)} />
 
                   <Image
                     source={{ uri: `https://image.tmdb.org/t/p/w300${item.poster_path}` }}
@@ -693,11 +610,6 @@ export default function MoodScreen({ navigation }: any) {
                 ) : null
               }
             />
-            {opening && (
-              <View style={styles.openingOverlay} pointerEvents="auto">
-                <ActivityIndicator size="large" color="#e50914" />
-              </View>
-            )}
           </View>
         )}
       </LinearGradient>
@@ -717,7 +629,7 @@ export default function MoodScreen({ navigation }: any) {
 
               <View style={styles.aiBadge}>
                 <Ionicons name="sparkles" size={12} color="#8888ff" />
-                <Text style={styles.aiBadgeText}>Powered by Groq AI</Text>
+                <Text style={styles.aiBadgeText}>Powered by Groq Compound · веб-поиск</Text>
               </View>
 
               <Text style={styles.subtitle}>
@@ -728,7 +640,7 @@ export default function MoodScreen({ navigation }: any) {
                 <TextInput
                   style={styles.input}
                   placeholder="Например: хочу посмотреть фильм про..."
-                  placeholderTextColor="#555"
+                  placeholderTextColor="#777"
                   value={mood}
                   onChangeText={setMood}
                   multiline

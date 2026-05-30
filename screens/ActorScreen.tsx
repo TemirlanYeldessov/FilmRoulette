@@ -3,7 +3,6 @@ import { Image } from 'expo-image';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useEffect, useMemo, useState } from 'react';
 import {
-  ActivityIndicator,
   FlatList,
   ScrollView,
   StyleSheet,
@@ -14,9 +13,12 @@ import {
 } from 'react-native';
 import PaginationBar from '../components/PaginationBar';
 import CardMark from '../components/CardMark';
+import { MovieCardSkeleton } from '../components/Skeleton';
+import { itemToMovie } from '../utils/tmdb';
 import { TMDB_TOKEN } from '../constants/api';
 
 const PAGE_SIZE = 20;
+const SKELETON_KEYS = [1, 2, 3, 4, 5, 6];
 
 type SortKey = 'popularity' | 'year' | 'rating';
 type TypeFilter = 'all' | 'movie' | 'tv';
@@ -82,23 +84,6 @@ async function fetchPerson(personId: number) {
       return true;
     });
   return { person, cast };
-}
-
-function itemToMovie(item: any) {
-  return {
-    id: item.id,
-    titleRu: item.title || item.name || '',
-    titleEn: item.title || item.name || '',
-    overview: item.overview || '',
-    poster: item.poster_path ? `https://image.tmdb.org/t/p/w500${item.poster_path}` : null,
-    trailerKey: null,
-    mediaType: item.media_type,
-    rating: item.vote_average > 0 ? item.vote_average.toFixed(1) : null,
-    year: (item.release_date || item.first_air_date || '').slice(0, 4),
-    country: null,
-    genres: null,
-    genreId: null,
-  };
 }
 
 const SORT_OPTS: { key: SortKey; label: string }[] = [
@@ -177,7 +162,10 @@ export default function ActorScreen({ route, navigation }: any) {
   };
 
   const openCard = (item: any) => {
-    navigation.navigate('Card', { movie: itemToMovie(item) });
+    // push, not navigate: Actor sits above a Card in the stack, so navigate
+    // would pop back to that existing Card (which ignores param changes)
+    // instead of opening the tapped title.
+    navigation.push('Card', { movie: itemToMovie(item) });
   };
 
   const bio = person?.biography || '';
@@ -266,9 +254,14 @@ export default function ActorScreen({ route, navigation }: any) {
       </TouchableOpacity>
 
       {loading ? (
-        <View style={styles.loadingBox}>
-          <ActivityIndicator size="large" color="#e50914" />
-        </View>
+        <FlatList
+          data={SKELETON_KEYS}
+          keyExtractor={i => String(i)}
+          numColumns={2}
+          contentContainerStyle={styles.grid}
+          columnWrapperStyle={styles.row}
+          renderItem={() => <MovieCardSkeleton cardWidth={cardWidth} />}
+        />
       ) : error ? (
         <View style={styles.errorBox}>
           <Ionicons name="cloud-offline-outline" size={42} color="#555" />
@@ -303,7 +296,7 @@ export default function ActorScreen({ route, navigation }: any) {
               <View style={styles.typeBadge}>
                 <Text style={styles.typeBadgeText}>{item.media_type === 'tv' ? 'Сериал' : 'Фильм'}</Text>
               </View>
-              <CardMark id={item.id} mediaType={item.media_type} />
+              <CardMark movie={itemToMovie(item)} />
               <Image
                 source={{ uri: `https://image.tmdb.org/t/p/w300${item.poster_path}` }}
                 style={[styles.poster, { width: cardWidth, height: cardWidth * 1.5 }]}

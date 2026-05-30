@@ -110,7 +110,7 @@ export default function PaginationBar({
               style={s.dialogInput}
               keyboardType="number-pad"
               placeholder={`1 – ${totalPages}`}
-              placeholderTextColor="#555"
+              placeholderTextColor="#777"
               value={input}
               onChangeText={v => { setInput(v); if (inputError) setInputError(''); }}
               autoFocus
