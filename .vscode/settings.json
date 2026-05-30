@@ -1,0 +1,10 @@
+{
+  "typescript.tsserver.excludeProject": ["**/node_modules/**/tsconfig.json"],
+  "typescript.enablePromptUseWorkspaceTsdk": true,
+  "files.exclude": {
+    "node_modules": true
+  },
+  "search.exclude": {
+    "node_modules": true
+  }
+}

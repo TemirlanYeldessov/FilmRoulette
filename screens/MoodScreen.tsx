@@ -23,7 +23,6 @@ import { useAppContext } from '../store/AppContext';
 import PosterCard from '../components/PosterCard';
 import { MovieCardSkeleton } from '../components/Skeleton';
 import { itemToMovie } from '../utils/tmdb';
-import { GEMINI_KEY } from '../constants/api';
 import { askGemini } from '../utils/gemini';
 import { makeTmdbFetch } from '../utils/api';
 import { tmdbUrls, tmdbHeaders } from '../utils/tmdbApi';
@@ -194,7 +193,28 @@ function buildAiPrompt(mood: string) {
   const now = new Date();
   const today = now.toISOString().slice(0, 10);
   const currentYear = now.getFullYear();
-  return `Ты эксперт по кино и сериалам. Сегодня: ${today} (текущий год — ${currentYear}).
+  return `[CRITICAL: SEMANTIC INTENT & TEMPORAL FILTERING]
+You must analyze the user's implicit and explicit intent regarding timeframes, accounting for all possible variations, synonyms, slang, or indirect phrasing. Categorize the user's temporal intent into one of the following dynamic pipelines based on the current calendar year:
+
+1. FRESH / NEW / RECENT INTENT
+- Phrasing variations: "новинки", "свежее", "недавнее", "что вышло", "последние релизы", "новое кино", "текущий год", "только что появилось", "что сейчас в кино", "fresh", "latest", "new", etc.
+- Action: Actively trigger the \`googleSearch\` tool.
+- Logic: Strict chronological filtering. Return ONLY titles released in the current calendar year and the final quarter (Q4) of the preceding year. If it is early in the current year, you may include the full previous year only if current-year titles are insufficient.
+
+2. VIBE MATCH / SIMILARITY INTENT (No chronological limits)
+- Phrasing variations: "по вайбу", "в стиле", "наподобие", "как X", "что-то похожее на X", "в духе", "атмосфера как в", "like X", "similar to X", "vibe of X", etc.
+- Action: Execute a hybrid search (internal knowledge base + \`googleSearch\` for recent matching titles).
+- Logic: Temporal-agnostic response. Provide a balanced, high-quality mix of timeless cinema classics and the most recent movie/series releases that match the requested theme, mood, or structural patterns of the target title.
+
+3. RETRO / OLD / HISTORICAL INTENT
+- Phrasing variations: "старое", "классика", "прошлых лет", "ретро", "кино детства", "советское", "90-е/80-е", "старинное", "old school", "classic", "vintage", "retro", specific past decades/centuries, etc.
+- Action: Rely on internal knowledge or targeted historical search query.
+- Logic: Inverse filtering. Strictly EXCLUDE any modern, recent, or current-decade releases. Restrict the output exclusively to the requested historical epoch or classic cinema parameters.
+
+[DYNAMICS]: If a user query combines categories (e.g., "свежие фильмы по вайбу Интерстеллара"), the FRESH INTENT constraints override the default vibe flexibility, and you must search for recent items matching that vibe.
+
+Теперь обработай запрос пользователя:
+Ты эксперт по кино и сериалам. Сегодня: ${today} (текущий год — ${currentYear}).
 Запрос пользователя: "${mood}".
 
 Сначала пойми НАМЕРЕНИЕ по смыслу, а не по простому совпадению слов. Учитывай отрицания ("не хочу новое", "только не старьё", "надоели новинки") — они меняют смысл на противоположный. Слова-подсказки ниже — лишь ориентир, а не триггеры.

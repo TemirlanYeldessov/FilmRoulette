@@ -16,7 +16,8 @@ export async function askGemini(prompt: string, model = 'gemini-2.5-flash'): Pro
   const body = {
     contents: [
       { parts: [{ text: prompt }] }
-    ]
+    ],
+    tools: [{ googleSearch: {} }]
   };
 
   const res = await fetch(url, {
