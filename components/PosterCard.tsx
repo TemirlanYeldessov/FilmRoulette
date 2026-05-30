@@ -3,6 +3,7 @@ import { ReactNode } from 'react';
 import { StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import CardMark from './CardMark';
 import { itemToMovie } from '../utils/tmdb';
+import { colors, radii, shadow } from '../constants/theme';
 
 interface Props {
   item: any;
@@ -40,9 +41,9 @@ export default function PosterCard({ item, cardWidth, onPress, mediaTypeFallback
 }
 
 const styles = StyleSheet.create({
-  card: {},
-  typeBadge: { position: 'absolute', top: 8, left: 8, backgroundColor: '#1a1a40', borderRadius: 10, paddingHorizontal: 8, paddingVertical: 3, zIndex: 1 },
-  typeBadgeText: { color: '#8888ff', fontSize: 11, fontWeight: '600' },
-  poster: { borderRadius: 10, marginBottom: 6 },
-  cardTitle: { color: '#fff', fontSize: 12, fontWeight: '600', marginBottom: 3 },
+  card: { borderRadius: radii.md },
+  typeBadge: { position: 'absolute', top: 8, left: 8, backgroundColor: colors.accentSoft, borderRadius: radii.pill, paddingHorizontal: 8, paddingVertical: 3, zIndex: 1, borderWidth: 1, borderColor: colors.whiteGlass },
+  typeBadgeText: { color: colors.text, fontSize: 11, fontWeight: '700' },
+  poster: { borderRadius: radii.md, marginBottom: 8, backgroundColor: colors.surface, ...shadow.card },
+  cardTitle: { color: colors.text, fontSize: 12, fontWeight: '700', marginBottom: 4, lineHeight: 16 },
 });

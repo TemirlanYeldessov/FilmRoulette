@@ -1,8 +1,9 @@
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Linking, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { WebView } from 'react-native-webview';
+import { colors, gradients, radii } from '../constants/theme';
 
 // kino.kz behind DDoS-Guard can hang without ever firing onLoadEnd/onError,
 // leaving an infinite spinner. Bail to the error state after this long.
@@ -26,27 +27,27 @@ export default function CinemaScreen({ navigation }: any) {
   const [error, setError] = useState(false);
   const [canGoBack, setCanGoBack] = useState(false);
 
-  const clearLoadTimer = () => {
+  const clearLoadTimer = useCallback(() => {
     if (timerRef.current) {
       clearTimeout(timerRef.current);
       timerRef.current = null;
     }
-  };
+  }, []);
 
-  const armLoadTimer = () => {
+  const armLoadTimer = useCallback(() => {
     clearLoadTimer();
     timerRef.current = setTimeout(() => {
       if (loadedRef.current) return;
       setError(true);
       setLoading(false);
     }, LOAD_TIMEOUT_MS);
-  };
+  }, [clearLoadTimer]);
 
   // Arm the watchdog for the initial load and clear it on unmount.
   useEffect(() => {
     armLoadTimer();
     return clearLoadTimer;
-  }, []);
+  }, [armLoadTimer, clearLoadTimer]);
 
   const openExternal = () => Linking.openURL(KINO_URL).catch(() => {});
 
@@ -64,23 +65,23 @@ export default function CinemaScreen({ navigation }: any) {
   };
 
   return (
-    <LinearGradient colors={['#0f0f1a', '#1a1a2e']} style={styles.container}>
+    <LinearGradient colors={gradients.app} style={styles.container}>
       <View style={styles.header}>
-        <TouchableOpacity style={styles.headerBtn} onPress={handleBack}>
-          <Ionicons name="chevron-back" size={20} color="#aaa" />
+        <TouchableOpacity style={styles.headerBtn} onPress={handleBack} accessibilityRole="button" accessibilityLabel="Назад">
+          <Ionicons name="chevron-back" size={20} color={colors.textSoft} />
         </TouchableOpacity>
         <View style={styles.headerTitleWrap}>
           <Text style={styles.headerTitle}>Сейчас в кино</Text>
           <Text style={styles.headerSubtitle}>Актобе · kino.kz</Text>
         </View>
-        <TouchableOpacity style={styles.headerBtn} onPress={openExternal}>
-          <Ionicons name="open-outline" size={18} color="#8888ff" />
+        <TouchableOpacity style={styles.headerBtn} onPress={openExternal} accessibilityRole="button" accessibilityLabel="Открыть в браузере">
+          <Ionicons name="open-outline" size={18} color={colors.accent} />
         </TouchableOpacity>
       </View>
 
       {error ? (
         <View style={styles.center}>
-          <Ionicons name="cloud-offline-outline" size={40} color="#555" />
+          <Ionicons name="cloud-offline-outline" size={40} color={colors.faint} />
           <Text style={styles.errorText}>Не удалось загрузить расписание</Text>
           <TouchableOpacity style={styles.retryBtn} onPress={reload}>
             <Text style={styles.retryText}>Повторить</Text>
@@ -105,7 +106,7 @@ export default function CinemaScreen({ navigation }: any) {
           />
           {loading && (
             <View style={styles.loadingOverlay} pointerEvents="none">
-              <ActivityIndicator size="large" color="#e50914" />
+              <ActivityIndicator size="large" color={colors.primary} />
             </View>
           )}
         </View>
@@ -122,18 +123,18 @@ const styles = StyleSheet.create({
     paddingTop: 60,
     paddingHorizontal: 12,
     paddingBottom: 12,
-    backgroundColor: '#0f0f1a',
+    backgroundColor: colors.bg,
     gap: 8,
   },
-  headerBtn: { width: 38, height: 38, borderRadius: 12, backgroundColor: '#1e1e30', alignItems: 'center', justifyContent: 'center' },
+  headerBtn: { width: 38, height: 38, borderRadius: radii.md, backgroundColor: colors.surfaceElevated, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: colors.borderSoft },
   headerTitleWrap: { flex: 1, alignItems: 'center' },
-  headerTitle: { color: '#fff', fontSize: 16, fontWeight: '700' },
-  headerSubtitle: { color: '#888', fontSize: 12, marginTop: 1 },
-  web: { flex: 1, backgroundColor: '#0f0f1a' },
-  loadingOverlay: { ...StyleSheet.absoluteFillObject, alignItems: 'center', justifyContent: 'center', backgroundColor: '#0f0f1a' },
+  headerTitle: { color: colors.text, fontSize: 16, fontWeight: '800' },
+  headerSubtitle: { color: colors.muted, fontSize: 12, marginTop: 1 },
+  web: { flex: 1, backgroundColor: colors.bg },
+  loadingOverlay: { ...StyleSheet.absoluteFillObject, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.bg },
   center: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 12, paddingHorizontal: 24 },
-  errorText: { color: '#aaa', fontSize: 15, textAlign: 'center' },
-  retryBtn: { backgroundColor: '#e50914', paddingHorizontal: 24, paddingVertical: 10, borderRadius: 20, marginTop: 4 },
-  retryText: { color: '#fff', fontWeight: '700', fontSize: 14 },
-  linkText: { color: '#8888ff', fontSize: 14, marginTop: 4 },
+  errorText: { color: colors.textSoft, fontSize: 15, textAlign: 'center' },
+  retryBtn: { backgroundColor: colors.primary, paddingHorizontal: 24, paddingVertical: 10, borderRadius: radii.pill, marginTop: 4 },
+  retryText: { color: colors.text, fontWeight: '800', fontSize: 14 },
+  linkText: { color: colors.accent, fontSize: 14, marginTop: 4, fontWeight: '700' },
 });

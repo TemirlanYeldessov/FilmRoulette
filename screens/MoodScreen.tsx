@@ -12,7 +12,6 @@ import {
   Text,
   TextInput,
   TouchableOpacity,
-  useWindowDimensions,
   View,
 } from 'react-native';
 import {
@@ -26,6 +25,9 @@ import { itemToMovie } from '../utils/tmdb';
 import { askGemini } from '../utils/gemini';
 import { makeTmdbFetch } from '../utils/api';
 import { tmdbUrls, tmdbHeaders } from '../utils/tmdbApi';
+import { useGridColumns } from '../utils/useGridColumns';
+import { tapMedium } from '../utils/haptics';
+import { colors, gradients, radii, shadow } from '../constants/theme';
 
 const RESOLVE_CONCURRENCY = 6;
 // How many AI titles to resolve against TMDB per page. The first page fills the
@@ -150,6 +152,15 @@ const SORT_OPTIONS = [
 
 type SortKey = (typeof SORT_OPTIONS)[number]['key'];
 
+const QUICK_REFINES = [
+  { label: 'Свежее', suffix: 'Покажи более свежие варианты, без старых тайтлов.' },
+  { label: 'Только фильмы', suffix: 'Оставь только фильмы.' },
+  { label: 'Только сериалы', suffix: 'Оставь только сериалы.' },
+  { label: 'Легче', suffix: 'Сделай подборку легче, добрее и проще для вечернего просмотра.' },
+  { label: 'Мрачнее', suffix: 'Сделай подборку более мрачной, напряженной и атмосферной.' },
+  { label: 'Популярнее', suffix: 'Сделай подборку из более известных и популярных тайтлов.' },
+] as const;
+
 function normalizeTitle(value: string) {
   return value
     .toLowerCase()
@@ -193,90 +204,91 @@ function buildAiPrompt(mood: string) {
   const now = new Date();
   const today = now.toISOString().slice(0, 10);
   const currentYear = now.getFullYear();
-  return `[CRITICAL: SEMANTIC INTENT & TEMPORAL FILTERING]
-You must analyze the user's implicit and explicit intent regarding timeframes, accounting for all possible variations, synonyms, slang, or indirect phrasing. Categorize the user's temporal intent into one of the following dynamic pipelines based on the current calendar year:
 
-1. FRESH / NEW / RECENT INTENT
-- Phrasing variations: "новинки", "свежее", "недавнее", "что вышло", "последние релизы", "новое кино", "текущий год", "только что появилось", "что сейчас в кино", "fresh", "latest", "new", etc.
-- Action: Actively trigger the \`googleSearch\` tool.
-- Logic: Strict chronological filtering. Return ONLY titles released in the current calendar year and the final quarter (Q4) of the preceding year. If it is early in the current year, you may include the full previous year only if current-year titles are insufficient.
+  return `Ты — эксперт по кино и сериалам. Отвечай только списком реальных фильмов/сериалов, которые можно найти в TMDB или IMDb.
 
-2. VIBE MATCH / SIMILARITY INTENT (No chronological limits)
-- Phrasing variations: "по вайбу", "в стиле", "наподобие", "как X", "что-то похожее на X", "в духе", "атмосфера как в", "like X", "similar to X", "vibe of X", etc.
-- Action: Execute a hybrid search (internal knowledge base + \`googleSearch\` for recent matching titles).
-- Logic: Temporal-agnostic response. Provide a balanced, high-quality mix of timeless cinema classics and the most recent movie/series releases that match the requested theme, mood, or structural patterns of the target title.
+Сегодня: ${today}. Текущий год: ${currentYear}.
+Запрос пользователя: "${mood}"
 
-3. RETRO / OLD / HISTORICAL INTENT
-- Phrasing variations: "старое", "классика", "прошлых лет", "ретро", "кино детства", "советское", "90-е/80-е", "старинное", "old school", "classic", "vintage", "retro", specific past decades/centuries, etc.
-- Action: Rely on internal knowledge or targeted historical search query.
-- Logic: Inverse filtering. Strictly EXCLUDE any modern, recent, or current-decade releases. Restrict the output exclusively to the requested historical epoch or classic cinema parameters.
+Проанализируй запрос по шагам:
 
-[DYNAMICS]: If a user query combines categories (e.g., "свежие фильмы по вайбу Интерстеллара"), the FRESH INTENT constraints override the default vibe flexibility, and you must search for recent items matching that vibe.
+1. Тип контента, поле mediaTypeFilter:
+- "movie" — если пользователь явно просит фильм/кино.
+- "tv" — если явно просит сериал/шоу/дораму/аниме-сериал.
+- "mixed" — если тип не указан или подходят и фильмы, и сериалы.
 
-Теперь обработай запрос пользователя:
-Ты эксперт по кино и сериалам. Сегодня: ${today} (текущий год — ${currentYear}).
-Запрос пользователя: "${mood}".
+2. Временное намерение:
+- Новинки / fresh / latest / "вышло недавно" / конкретный свежий год (${currentYear}, ${currentYear - 1}) → используй доступный Google Search и возвращай только ${currentYear} и конец ${currentYear - 1}. Если релизов мало, верни сколько есть, не добавляй старое для количества.
+- Классика / ретро / старое / 90-е / 80-е / советское / кино детства → возвращай только тайтлы из запрошенной эпохи или явно старые/классические тайтлы.
+- По вайбу / похоже на X / в стиле X / like X → возвращай релевантный микс разных лет; если есть подходящие свежие релизы, включи их тоже.
+- Если запрос смешивает свежесть и вайб, например "новое по вайбу Интерстеллара", приоритет у свежести.
+- Учитывай отрицания: "не хочу новое" означает не подбирать новинки; "только не старьё" означает избегать старых тайтлов.
 
-Сначала пойми НАМЕРЕНИЕ по смыслу, а не по простому совпадению слов. Учитывай отрицания ("не хочу новое", "только не старьё", "надоели новинки") — они меняют смысл на противоположный. Слова-подсказки ниже — лишь ориентир, а не триггеры.
+3. Правила выдачи:
+- Только реально существующие тайтлы; если не уверен, не включай.
+- Названия только на английском, как в TMDB/IMDb.
+- Без повторов.
+- Сначала самые релевантные.
+- Верни 8-60 тайтлов: узкий запрос — меньше, широкий запрос — больше.
 
-ШАГ 1 — Тип контента (mediaTypeFilter):
-- Просит фильм/кино/movie → "movie" (только фильмы)
-- Просит сериал/шоу/сезоны/series → "tv" (только сериалы)
-- Тип не важен или не назван → "mixed" (и фильмы, и сериалы)
-
-ШАГ 2 — Период:
-- НОВИНКИ — хочет свежее/недавнее или назвал конкретный год (${currentYear}, ${currentYear - 1}…). ОБЯЗАТЕЛЬНО найди реальные релизы ВЕБ-ПОИСКОМ (память может устареть). Включай ТОЛЬКО этот период (назван год — строго он; "новинки" без года — ${currentYear} и конец ${currentYear - 1}). Без старья и без "разнообразия годов". Мало релизов — верни сколько есть.
-- КЛАССИКА/СТАРОЕ — хочет старое/классику/ретро. Признанные старые тайтлы по вайбу; знаковая "современная классика" тоже допустима — классика не обязана быть только очень старой.
-- КОНКРЕТНЫЙ ДИАПАЗОН — назвал десятилетие или промежуток (90-е, 2000-е, "2010–2015"). Только тайтлы из этого диапазона.
-- ЗА ВСЕ ВРЕМЕНА (по умолчанию для общего/вайбового запроса) — и старое, и новое, максимум разнообразия по годам. ОБЯЗАТЕЛЬНО добавь и подходящие по вайбу свежие релизы ${currentYear}/${currentYear - 1} (через веб-поиск, число не ограничивай), чтобы были и новинки, а не только старое.
-
-ШАГ 3 — Что подбирать:
-- Назван конкретный фильм/сериал, франшиза/сага, режиссёр или актёр → выдай связанное с ним (части франшизы, фильмографию, близкое по стилю и духу). Это важнее абстрактного вайба.
-- Описан вайб/настроение/жанр/сюжет → подбирай по атмосфере и элементам, что упомянул пользователь.
-
-При конфликте сигналов приоритет у более конкретного и явного условия (явный год важнее общего вайба).
-
-Объём — под запрос: узкий/конкретный (один фильм, франшиза) → несколько точных, не раздувай; широкий → много (ориентир 50-60, можно больше). Релевантность важнее числа.
-
-Правила:
-- Соблюдай mediaTypeFilter и период строго.
-- Только реально существующие тайтлы; сомневаешься, что существует — не включай.
-- Без повторов, только уникальные.
-- Расположи по убыванию релевантности — самые точные совпадения первыми.
-
-Ответь СТРОГО одним JSON-объектом, без markdown и без любого текста до или после него:
+Ответь строго одним JSON-объектом без markdown и без текста до или после него:
 {
-  "mediaTypeFilter": "movie" | "tv" | "mixed",
-  "titles": ["English Title 1", "English Title 2", ...]
+  "mediaTypeFilter": "mixed",
+  "titles": ["English Title 1", "English Title 2"]
+}`;
 }
-Названия — международные английские (под которыми тайтл есть в TMDB/IMDb).`;
+// Prefer Gemini with Google Search grounding for fresh releases. If the search
+// tool fails, retry the same prompt without grounding so the feature still works.
+function parseGeminiResult(text: string) {
+  const jsonText = extractJsonObject(text);
+  if (!jsonText) {
+    throw new Error('Не удалось распознать ответ ИИ. Попробуй ещё раз.');
+  }
+  return normalizeGeminiResult(JSON.parse(jsonText));
 }
 
-// Prefer Gemini — an agentic system with built-in web search, so it
-// knows fresh releases the offline model can't. Fall back to the plain Llama
-// model if web-capable Gemini is unavailable, rate-limited, or returns garbled JSON.
 async function askAI(mood: string, signal?: AbortSignal): Promise<GeminiResult> {
+  const prompt = buildAiPrompt(mood);
   try {
-    // Prefer web-capable models when available; primary choice is Gemini.
-    const r = await askGemini(mood, 'gemini-2.5-flash');
-    // askGemini should return an object or text; parse JSON if needed below.
-    const jsonText = extractJsonObject(typeof r === 'string' ? r : (r.text || ''));
-    if (!jsonText) throw new Error('Не удалось распознать ответ ИИ. Попробуй ещё раз.');
-    const parsed = JSON.parse(jsonText);
-    return { ...normalizeGeminiResult(parsed), webSearch: true };
+    // Prefer web-capable Gemini when available.
+    const r = await askGemini(prompt, 'gemini-2.5-flash', {
+      signal,
+      googleSearch: true,
+      timeoutMs: 25000,
+      maxOutputTokens: 4000,
+    });
+    return { ...parseGeminiResult(r.text), webSearch: true };
   } catch (e: any) {
     if (e?.name === 'AbortError') throw e;
-    // Fallback: try the same Gemini model (may be offline), mark webSearch accordingly.
-    const r = await askGemini(mood, 'gemini-2.5-flash');
-    const jsonText = extractJsonObject(typeof r === 'string' ? r : (r.text || ''));
-    if (!jsonText) throw e;
-    const parsed = JSON.parse(jsonText);
-    return { ...normalizeGeminiResult(parsed), webSearch: false };
+    // Fallback: try Gemini without grounding, mark webSearch accordingly.
+    const r = await askGemini(prompt, 'gemini-2.5-flash', {
+      signal,
+      googleSearch: false,
+      timeoutMs: 30000,
+      maxOutputTokens: 3000,
+    });
+    return { ...parseGeminiResult(r.text), webSearch: false };
   }
 }
 
-// askGemini is delegated to `utils/gemini.ts` which calls a native bridge
-// implemented with the official SDK (com.google.ai.client.generativeai).
+// askGemini is delegated to `utils/gemini.ts`, which calls Gemini's REST API.
+
+function friendlyAiError(e: any) {
+  const message = String(e?.message || '');
+  if (/429|перегруж|quota|rate/i.test(message)) {
+    return 'ИИ сейчас перегружен. Попробуй ещё раз через минуту.';
+  }
+  if (/Gemini API error|API key|403|401/i.test(message)) {
+    return 'ИИ-подбор временно недоступен. Проверь ключ Gemini и попробуй ещё раз.';
+  }
+  if (/network|fetch|internet|не отвечает|timeout|ожид/i.test(message)) {
+    return 'Не получилось связаться с ИИ. Проверь интернет и попробуй снова.';
+  }
+  if (/JSON|распознать|пустой ответ|названия/i.test(message)) {
+    return 'ИИ ответил не так, как ожидалось. Нажми «Пересобрать» или уточни запрос.';
+  }
+  return 'Не удалось собрать подборку. Попробуй переформулировать запрос.';
+}
 
 async function searchTitle(title: string, adultContent: boolean, mediaTypeFilter: string, signal?: AbortSignal) {
   const res = await fetchWithTimeout(
@@ -300,9 +312,9 @@ async function searchTitle(title: string, adultContent: boolean, mediaTypeFilter
 
 export default function MoodScreen({ navigation }: any) {
   const { adultContent } = useAppContext();
-  const { width } = useWindowDimensions();
-  const cardWidth = useMemo(() => (width - 48) / 2, [width]);
+  const { columns, cardWidth } = useGridColumns();
   const [mood, setMood] = useState('');
+  const [activeQuery, setActiveQuery] = useState('');
   const [loading, setLoading] = useState(false);
   const [results, setResults] = useState<any[]>([]);
   const [showInput, setShowInput] = useState(true);
@@ -322,6 +334,7 @@ export default function MoodScreen({ navigation }: any) {
   const aiFilterRef = useRef<string>('mixed');
   const slotsRef = useRef<(any | null)[]>([]);
   const resolveCursorRef = useRef(0);
+  const submitDisabled = !mood.trim() || loading;
 
   // Keep `results` in the AI's relevance order; derive the displayed order so
   // switching sort never loses the original ranking ('relevance' returns it).
@@ -479,9 +492,15 @@ export default function MoodScreen({ navigation }: any) {
   };
 
   const find = async (text: string) => {
-    if (!text.trim()) return;
+    const query = text.trim();
+    if (!query) {
+      setError('Опиши настроение или выбери идею для поиска.');
+      setShowInput(true);
+      return;
+    }
 
     if (isListening) stopListening();
+    tapMedium();
 
     findAbortRef.current?.abort();
     const controller = new AbortController();
@@ -489,6 +508,7 @@ export default function MoodScreen({ navigation }: any) {
     const { signal } = controller;
 
     setLoading(true);
+    setActiveQuery(query);
     setResults([]);
     setError('');
     setShowInput(false);
@@ -501,12 +521,12 @@ export default function MoodScreen({ navigation }: any) {
     resolveCursorRef.current = 0;
 
     try {
-      const aiResult = await askAI(text, signal);
+      const aiResult = await askAI(query, signal);
       if (signal.aborted) return;
 
       // Freshness query but the web-search model failed → the offline fallback's
       // "new releases" can't be trusted. Warn instead of silently showing stale data.
-      setStaleNotice(!aiResult.webSearch && isFreshnessQuery(text));
+      setStaleNotice(!aiResult.webSearch && isFreshnessQuery(query));
 
       aiTitlesRef.current = aiResult.titles;
       aiFilterRef.current = aiResult.mediaTypeFilter;
@@ -523,7 +543,7 @@ export default function MoodScreen({ navigation }: any) {
     } catch (e: any) {
       if (e?.name === 'AbortError') return;
       console.error(e);
-      setError(e?.message || 'Не удалось получить подборку. Попробуй ещё раз.');
+      setError(friendlyAiError(e));
       setShowInput(true);
     } finally {
       // findAbortRef is intentionally NOT cleared here — scroll-driven batches
@@ -552,11 +572,27 @@ export default function MoodScreen({ navigation }: any) {
     navigation.navigate('Card', { movie: itemToMovie(item) });
   };
 
+  const hideResult = (item: any) => {
+    const key = `${item.id}-${item.media_type}`;
+    slotsRef.current = slotsRef.current.map(slot =>
+      slot && `${slot.id}-${slot.media_type}` === key ? null : slot
+    );
+    setResults(prev => prev.filter(it => `${it.id}-${it.media_type}` !== key));
+  };
+
+  const applyQuickRefine = (suffix: string) => {
+    const base = activeQuery || mood;
+    const next = `${base}. ${suffix}`;
+    setMood(next);
+    find(next);
+  };
+
   const reset = () => {
     findAbortRef.current?.abort();
     setShowInput(true);
     setResults([]);
     setMood('');
+    setActiveQuery('');
     setError('');
     setResolvingMore(false);
     setAllResolved(false);
@@ -571,12 +607,19 @@ export default function MoodScreen({ navigation }: any) {
 
   if (!showInput) {
     return (
-      <LinearGradient colors={['#0f0f1a', '#1a1a2e']} style={styles.container}>
+      <LinearGradient colors={gradients.app} style={styles.container}>
         <View style={styles.resultsHeader}>
           <TouchableOpacity onPress={reset} style={styles.backBtn}>
-            <Ionicons name="chevron-back" size={18} color="#8888ff" />
+            <Ionicons name="chevron-back" size={18} color={colors.accent} />
             <Text style={styles.backBtnText}>Новый запрос</Text>
           </TouchableOpacity>
+
+          {!!activeQuery && (
+            <View style={styles.queryBox}>
+              <Text style={styles.queryLabel}>По запросу</Text>
+              <Text style={styles.queryText} numberOfLines={2}>{activeQuery}</Text>
+            </View>
+          )}
 
           {loading ? (
             totalTitles > 0 ? (
@@ -587,23 +630,37 @@ export default function MoodScreen({ navigation }: any) {
               <Text style={styles.countText}>Найдено: {results.length}</Text>
               <View style={styles.actionBtns}>
                 <TouchableOpacity style={styles.actionBtn} onPress={refine}>
-                  <Ionicons name="create-outline" size={15} color="#8888ff" />
+                  <Ionicons name="create-outline" size={15} color={colors.accent} />
                   <Text style={styles.actionBtnText}>Уточнить</Text>
                 </TouchableOpacity>
                 <TouchableOpacity style={styles.actionBtn} onPress={() => find(mood)}>
-                  <Ionicons name="refresh" size={15} color="#8888ff" />
-                  <Text style={styles.actionBtnText}>Ещё варианты</Text>
+                  <Ionicons name="refresh" size={15} color={colors.accent} />
+                  <Text style={styles.actionBtnText}>Пересобрать</Text>
                 </TouchableOpacity>
               </View>
             </View>
           )}
         </View>
 
+        {!loading && !!activeQuery && (
+          <View style={styles.quickRefineBar}>
+            {QUICK_REFINES.map(refineOption => (
+              <TouchableOpacity
+                key={refineOption.label}
+                style={styles.quickRefineChip}
+                onPress={() => applyQuickRefine(refineOption.suffix)}
+              >
+                <Text style={styles.quickRefineText}>{refineOption.label}</Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+        )}
+
         {staleNotice && (
           <View style={styles.staleNotice}>
-            <Ionicons name="warning-outline" size={15} color="#e0a030" />
+            <Ionicons name="warning-outline" size={15} color={colors.warning} />
             <Text style={styles.staleNoticeText}>
-              Веб-поиск новинок был недоступен — список мог не попасть в самые свежие релизы. Попробуй «Ещё варианты».
+              Веб-поиск новинок был недоступен — список мог не попасть в самые свежие релизы. Попробуй «Пересобрать».
             </Text>
           </View>
         )}
@@ -617,7 +674,7 @@ export default function MoodScreen({ navigation }: any) {
                 style={[styles.sortChip, sortBy === opt.key && styles.sortChipActive]}
                 onPress={() => setSortBy(opt.key)}
               >
-                <Ionicons name={opt.icon} size={13} color={sortBy === opt.key ? '#fff' : '#8888ff'} />
+                <Ionicons name={opt.icon} size={13} color={sortBy === opt.key ? colors.text : colors.accent} />
                 <Text style={[styles.sortChipText, sortBy === opt.key && styles.sortChipTextActive]}>{opt.label}</Text>
               </TouchableOpacity>
             ))}
@@ -628,7 +685,8 @@ export default function MoodScreen({ navigation }: any) {
           <FlatList
             data={SKELETON_KEYS}
             keyExtractor={i => String(i)}
-            numColumns={2}
+            key={`grid-${columns}`}
+            numColumns={columns}
             contentContainerStyle={styles.grid}
             columnWrapperStyle={styles.row}
             ListHeaderComponent={
@@ -643,7 +701,8 @@ export default function MoodScreen({ navigation }: any) {
             <FlatList
               data={sortedResults}
               keyExtractor={(item) => `${item.media_type}-${item.id}`}
-              numColumns={2}
+              key={`grid-${columns}`}
+              numColumns={columns}
               contentContainerStyle={styles.grid}
               columnWrapperStyle={styles.row}
               onEndReached={loadMoreResults}
@@ -657,24 +716,28 @@ export default function MoodScreen({ navigation }: any) {
                       {getItemYear(item) > 0 ? getItemYear(item) : ''}
                     </Text>
                   )}
+                  <TouchableOpacity style={styles.hideResultBtn} onPress={() => hideResult(item)}>
+                    <Ionicons name="close-circle-outline" size={13} color={colors.muted2} />
+                    <Text style={styles.hideResultText}>Не подходит</Text>
+                  </TouchableOpacity>
                 </PosterCard>
               )}
               ListEmptyComponent={
                 loading ? null : (
                   <View style={styles.emptyBox}>
-                    <Ionicons name="search-outline" size={38} color="#555" />
+                    <Ionicons name="search-outline" size={38} color={colors.faint} />
                     <Text style={styles.emptyTitle}>Ничего не нашлось на TMDB</Text>
                     <Text style={styles.emptyHint}>
                       ИИ подобрал тайтлы, но их не удалось найти в базе. Попробуй переформулировать запрос.
                     </Text>
                     <View style={styles.emptyActions}>
                       <TouchableOpacity style={styles.emptyBtn} onPress={refine}>
-                        <Ionicons name="create-outline" size={15} color="#8888ff" />
+                        <Ionicons name="create-outline" size={15} color={colors.accent} />
                         <Text style={styles.emptyBtnText}>Уточнить</Text>
                       </TouchableOpacity>
                       <TouchableOpacity style={styles.emptyBtn} onPress={() => find(mood)}>
-                        <Ionicons name="refresh" size={15} color="#8888ff" />
-                        <Text style={styles.emptyBtnText}>Ещё варианты</Text>
+                        <Ionicons name="refresh" size={15} color={colors.accent} />
+                        <Text style={styles.emptyBtnText}>Пересобрать</Text>
                       </TouchableOpacity>
                     </View>
                   </View>
@@ -683,7 +746,7 @@ export default function MoodScreen({ navigation }: any) {
               ListFooterComponent={
                 (loading || resolvingMore) ? (
                   <View style={styles.streamFooter}>
-                    <ActivityIndicator size="small" color="#e50914" />
+                    <ActivityIndicator size="small" color={colors.primary} />
                     <Text style={styles.streamFooterText}>Ищу ещё…</Text>
                   </View>
                 ) : null
@@ -696,7 +759,7 @@ export default function MoodScreen({ navigation }: any) {
   }
 
   return (
-    <LinearGradient colors={['#0f0f1a', '#1a1a2e']} style={styles.container}>
+      <LinearGradient colors={gradients.app} style={styles.container}>
       <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={{ flex: 1 }}>
         <FlatList
           data={suggestions}
@@ -707,7 +770,7 @@ export default function MoodScreen({ navigation }: any) {
               <Text style={styles.header}>✨ ИИ-подборщик</Text>
 
               <View style={styles.aiBadge}>
-                <Ionicons name="sparkles" size={12} color="#8888ff" />
+                <Ionicons name="sparkles" size={12} color={colors.accent} />
                 <Text style={styles.aiBadgeText}>Powered by Gemini · веб-поиск</Text>
               </View>
 
@@ -719,9 +782,12 @@ export default function MoodScreen({ navigation }: any) {
                 <TextInput
                   style={styles.input}
                   placeholder="Например: хочу посмотреть фильм про..."
-                  placeholderTextColor="#777"
+                  placeholderTextColor={colors.muted2}
                   value={mood}
-                  onChangeText={setMood}
+                  onChangeText={(value) => {
+                    setMood(value);
+                    if (error) setError('');
+                  }}
                   multiline
                   numberOfLines={3}
                 />
@@ -729,11 +795,13 @@ export default function MoodScreen({ navigation }: any) {
                 <TouchableOpacity
                   style={[styles.micBtn, isListening && styles.micBtnActive]}
                   onPress={isListening ? stopListening : startListening}
+                  accessibilityRole="button"
+                  accessibilityLabel={isListening ? 'Остановить голосовой ввод' : 'Голосовой ввод запроса'}
                 >
                   <Ionicons
                     name={isListening ? 'stop-circle' : 'mic'}
                     size={24}
-                    color={isListening ? '#e50914' : '#aaa'}
+                    color={isListening ? colors.primary : colors.textSoft}
                   />
                 </TouchableOpacity>
               </View>
@@ -747,14 +815,18 @@ export default function MoodScreen({ navigation }: any) {
 
               {error ? (
                 <View style={styles.errorBox}>
-                  <Ionicons name="alert-circle-outline" size={16} color="#e50914" />
+                  <Ionicons name="alert-circle-outline" size={16} color={colors.primary} />
                   <Text style={styles.errorText}>{error}</Text>
                 </View>
               ) : null}
 
-              <TouchableOpacity style={styles.findBtn} onPress={() => find(mood)}>
-                <Ionicons name="sparkles" size={18} color="#fff" />
-                <Text style={styles.findText}>Подобрать</Text>
+              <TouchableOpacity
+                style={[styles.findBtn, submitDisabled && styles.findBtnDisabled]}
+                onPress={() => find(mood)}
+                disabled={submitDisabled}
+              >
+                <Ionicons name="sparkles" size={18} color={colors.text} />
+                <Text style={styles.findText}>{mood.trim() ? 'Подобрать' : 'Опиши запрос'}</Text>
               </TouchableOpacity>
 
               <Text style={styles.suggestTitle}>Идеи для поиска:</Text>
@@ -780,50 +852,59 @@ export default function MoodScreen({ navigation }: any) {
 const styles = StyleSheet.create({
   container: { flex: 1 },
   inputArea: { padding: 20, paddingTop: 60 },
-  header: { fontSize: 26, fontWeight: 'bold', color: '#fff', marginBottom: 8 },
-  aiBadge: { flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: '#1a1a40', borderWidth: 1, borderColor: '#4444aa', paddingHorizontal: 12, paddingVertical: 6, borderRadius: 20, alignSelf: 'flex-start', marginBottom: 12 },
-  aiBadgeText: { color: '#8888ff', fontSize: 12, fontWeight: '600' },
-  subtitle: { fontSize: 14, color: '#aaa', marginBottom: 24, lineHeight: 20 },
+  header: { fontSize: 29, fontWeight: '900', color: colors.text, marginBottom: 8 },
+  aiBadge: { flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: colors.accentSoft, borderWidth: 1, borderColor: colors.border, paddingHorizontal: 12, paddingVertical: 6, borderRadius: radii.pill, alignSelf: 'flex-start', marginBottom: 12 },
+  aiBadgeText: { color: colors.textSoft, fontSize: 12, fontWeight: '700' },
+  subtitle: { fontSize: 14, color: colors.textSoft, marginBottom: 24, lineHeight: 20 },
   inputRow: { flexDirection: 'row', gap: 10, marginBottom: 8, alignItems: 'flex-start' },
-  input: { flex: 1, backgroundColor: '#1e1e30', borderRadius: 16, padding: 16, color: '#fff', fontSize: 15, minHeight: 80, textAlignVertical: 'top' },
-  micBtn: { backgroundColor: '#1e1e30', borderRadius: 16, width: 52, height: 52, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: '#333' },
-  micBtnActive: { backgroundColor: '#1a0505', borderColor: '#e50914' },
+  input: { flex: 1, backgroundColor: colors.surfaceElevated, borderRadius: radii.lg, padding: 16, color: colors.text, fontSize: 15, minHeight: 92, textAlignVertical: 'top', borderWidth: 1, borderColor: colors.borderSoft, ...shadow.card },
+  micBtn: { backgroundColor: colors.surfaceElevated, borderRadius: radii.lg, width: 52, height: 52, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: colors.borderSoft },
+  micBtnActive: { backgroundColor: colors.dangerBg, borderColor: colors.primary },
   listeningBadge: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 8 },
-  listeningDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: '#e50914' },
-  listeningText: { color: '#e50914', fontSize: 13, fontWeight: '600' },
-  errorBox: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: '#2a0a0a', borderRadius: 12, padding: 12, marginBottom: 12 },
-  errorText: { color: '#e50914', fontSize: 13, flex: 1 },
-  findBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, backgroundColor: '#e50914', paddingVertical: 16, borderRadius: 30, marginBottom: 24, marginTop: 8 },
-  findText: { color: '#fff', fontWeight: '700', fontSize: 16 },
-  suggestTitle: { fontSize: 15, color: '#aaa', marginBottom: 12 },
-  chip: { borderWidth: 1, borderColor: '#333', paddingHorizontal: 14, paddingVertical: 10, borderRadius: 20, marginHorizontal: 20, marginBottom: 10 },
-  chipText: { color: '#ccc', fontSize: 13 },
+  listeningDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: colors.primary },
+  listeningText: { color: colors.primary, fontSize: 13, fontWeight: '700' },
+  errorBox: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: colors.dangerBg, borderRadius: radii.md, padding: 12, marginBottom: 12, borderWidth: 1, borderColor: colors.primaryDark },
+  errorText: { color: colors.primary, fontSize: 13, flex: 1 },
+  findBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, backgroundColor: colors.primary, paddingVertical: 16, borderRadius: radii.pill, marginBottom: 24, marginTop: 8, ...shadow.card },
+  findBtnDisabled: { opacity: 0.45 },
+  findText: { color: colors.text, fontWeight: '800', fontSize: 16 },
+  suggestTitle: { fontSize: 15, color: colors.textSoft, marginBottom: 12 },
+  chip: { borderWidth: 1, borderColor: colors.borderSoft, backgroundColor: colors.surface, paddingHorizontal: 14, paddingVertical: 10, borderRadius: radii.pill, marginHorizontal: 20, marginBottom: 10 },
+  chipText: { color: colors.textSoft, fontSize: 13, fontWeight: '600' },
   resultsHeader: { paddingTop: 60, paddingHorizontal: 20, paddingBottom: 12 },
   backBtn: { flexDirection: 'row', alignItems: 'center', gap: 4, marginBottom: 12 },
-  backBtnText: { color: '#8888ff', fontSize: 14 },
-  countText: { color: '#888', fontSize: 12, marginTop: 4 },
+  backBtnText: { color: colors.accent, fontSize: 14, fontWeight: '700' },
+  countText: { color: colors.muted, fontSize: 12, marginTop: 4 },
   resultActions: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 8 },
   actionBtns: { flexDirection: 'row', gap: 8 },
-  actionBtn: { flexDirection: 'row', alignItems: 'center', gap: 5, backgroundColor: '#1e1e40', borderWidth: 1, borderColor: '#3a3a66', paddingHorizontal: 12, paddingVertical: 7, borderRadius: 18 },
-  actionBtnText: { color: '#8888ff', fontSize: 12, fontWeight: '600' },
-  staleNotice: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: '#2a2410', borderWidth: 1, borderColor: '#5a4a1a', borderRadius: 12, padding: 12, marginHorizontal: 20, marginBottom: 12 },
-  staleNoticeText: { color: '#e0a030', fontSize: 12, flex: 1, lineHeight: 17 },
+  actionBtn: { flexDirection: 'row', alignItems: 'center', gap: 5, backgroundColor: colors.accentSoft, borderWidth: 1, borderColor: colors.border, paddingHorizontal: 12, paddingVertical: 7, borderRadius: radii.pill },
+  actionBtnText: { color: colors.textSoft, fontSize: 12, fontWeight: '700' },
+  queryBox: { backgroundColor: colors.surfaceElevated, borderWidth: 1, borderColor: colors.border, borderRadius: radii.lg, padding: 12, marginBottom: 10 },
+  queryLabel: { color: colors.muted2, fontSize: 11, fontWeight: '800', textTransform: 'uppercase', marginBottom: 4 },
+  queryText: { color: colors.textSoft, fontSize: 13, lineHeight: 18 },
+  quickRefineBar: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, paddingHorizontal: 20, paddingBottom: 12 },
+  quickRefineChip: { borderWidth: 1, borderColor: colors.borderSoft, backgroundColor: colors.surface, paddingHorizontal: 12, paddingVertical: 7, borderRadius: radii.pill },
+  quickRefineText: { color: colors.textSoft, fontSize: 12, fontWeight: '700' },
+  staleNotice: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: colors.warningBg, borderWidth: 1, borderColor: colors.warning, borderRadius: radii.md, padding: 12, marginHorizontal: 20, marginBottom: 12 },
+  staleNoticeText: { color: colors.warning, fontSize: 12, flex: 1, lineHeight: 17 },
   sortBar: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 8, paddingHorizontal: 20, paddingBottom: 12 },
-  sortLabel: { color: '#888', fontSize: 12, marginRight: 2 },
-  sortChip: { flexDirection: 'row', alignItems: 'center', gap: 5, backgroundColor: '#1e1e30', borderWidth: 1, borderColor: '#333', paddingHorizontal: 12, paddingVertical: 7, borderRadius: 18 },
-  sortChipActive: { backgroundColor: '#e50914', borderColor: '#e50914' },
-  sortChipText: { color: '#8888ff', fontSize: 12, fontWeight: '600' },
-  sortChipTextActive: { color: '#fff' },
+  sortLabel: { color: colors.muted, fontSize: 12, marginRight: 2 },
+  sortChip: { flexDirection: 'row', alignItems: 'center', gap: 5, backgroundColor: colors.surfaceElevated, borderWidth: 1, borderColor: colors.borderSoft, paddingHorizontal: 12, paddingVertical: 7, borderRadius: radii.pill },
+  sortChipActive: { backgroundColor: colors.primary, borderColor: colors.primary },
+  sortChipText: { color: colors.accent, fontSize: 12, fontWeight: '700' },
+  sortChipTextActive: { color: colors.text },
   emptyBox: { alignItems: 'center', paddingTop: 48, paddingHorizontal: 24 },
-  emptyTitle: { color: '#aaa', fontSize: 16, textAlign: 'center', marginTop: 10 },
-  emptyHint: { color: '#555', fontSize: 13, textAlign: 'center', marginTop: 6, lineHeight: 19 },
+  emptyTitle: { color: colors.textSoft, fontSize: 16, textAlign: 'center', marginTop: 10, fontWeight: '700' },
+  emptyHint: { color: colors.muted2, fontSize: 13, textAlign: 'center', marginTop: 6, lineHeight: 19 },
   emptyActions: { flexDirection: 'row', gap: 10, marginTop: 16 },
-  emptyBtn: { flexDirection: 'row', alignItems: 'center', gap: 5, backgroundColor: '#1e1e40', borderWidth: 1, borderColor: '#3a3a66', paddingHorizontal: 14, paddingVertical: 9, borderRadius: 18 },
-  emptyBtnText: { color: '#8888ff', fontSize: 13, fontWeight: '600' },
+  emptyBtn: { flexDirection: 'row', alignItems: 'center', gap: 5, backgroundColor: colors.accentSoft, borderWidth: 1, borderColor: colors.border, paddingHorizontal: 14, paddingVertical: 9, borderRadius: radii.pill },
+  emptyBtnText: { color: colors.textSoft, fontSize: 13, fontWeight: '700' },
   streamFooter: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, paddingVertical: 18 },
-  streamFooterText: { color: '#888', fontSize: 13 },
-  loadingText: { color: '#aaa', fontSize: 15, textAlign: 'center', lineHeight: 22 },
+  streamFooterText: { color: colors.muted, fontSize: 13 },
+  loadingText: { color: colors.textSoft, fontSize: 15, textAlign: 'center', lineHeight: 22 },
   grid: { padding: 12 },
   row: { justifyContent: 'space-between', marginBottom: 12 },
-  cardRating: { color: '#aaa', fontSize: 11 },
+  cardRating: { color: colors.muted, fontSize: 11, fontWeight: '600' },
+  hideResultBtn: { flexDirection: 'row', alignItems: 'center', gap: 4, alignSelf: 'flex-start', marginTop: 5, paddingVertical: 3 },
+  hideResultText: { color: colors.muted2, fontSize: 11, fontWeight: '700' },
 });

@@ -1,18 +1,19 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { createContext, useContext, useEffect, useState } from 'react';
+import type { MediaItem, UserMovieStatus } from '../types/media';
 
-export type UserMovieStatus = 'want' | 'watched' | 'liked' | 'disliked';
+export type { UserMovieStatus } from '../types/media';
 
 interface AppContextType {
   hydrated: boolean;
   adultContent: boolean;
   toggleAdultContent: () => void;
-  watchlist: any[];
-  addToWatchlist: (movie: any) => void;
+  watchlist: MediaItem[];
+  addToWatchlist: (movie: MediaItem) => void;
   removeFromWatchlist: (id: number, mediaType: string) => void;
   isInWatchlist: (id: number, mediaType: string) => boolean;
   userRatings: Record<string, UserMovieStatus>;
-  setUserStatus: (movie: any, status: UserMovieStatus) => void;
+  setUserStatus: (movie: MediaItem, status: UserMovieStatus) => void;
   clearUserStatus: (id: number, mediaType: string) => void;
   getUserStatus: (id: number, mediaType: string) => UserMovieStatus | null;
   recentRandomIds: string[];
@@ -21,6 +22,8 @@ interface AppContextType {
   isRecentlyRandom: (id: number, mediaType: string) => boolean;
   onboardingSeen: boolean;
   markOnboardingSeen: () => void;
+  clearWatchlist: () => void;
+  resetOnboarding: () => void;
 }
 
 const AppContext = createContext<AppContextType>({} as AppContextType);
@@ -53,7 +56,7 @@ function safeParse<T>(raw: string | null, fallback: T): T {
   }
 }
 
-function toSlimMovie(movie: any) {
+function toSlimMovie(movie: MediaItem): MediaItem {
   return {
     id: movie.id,
     mediaType: movie.mediaType,
@@ -73,7 +76,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   // otherwise the empty in-memory defaults would overwrite real saved data.
   const [canPersist, setCanPersist] = useState(false);
   const [adultContent, setAdultContent] = useState(false);
-  const [watchlist, setWatchlist] = useState<any[]>([]);
+  const [watchlist, setWatchlist] = useState<MediaItem[]>([]);
   const [userRatings, setUserRatingsState] = useState<Record<string, UserMovieStatus>>({});
   const [recentRandomIds, setRecentRandomIds] = useState<string[]>([]);
   const [onboardingSeen, setOnboardingSeen] = useState(true);
@@ -231,6 +234,20 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     setOnboardingSeen(true);
   };
 
+  // Wipe the whole collection and every grade in one go. Ratings are cleared
+  // alongside the watchlist so no orphaned "seen" marks linger on grids.
+  const clearWatchlist = () => {
+    if (!hydrated) return;
+    setWatchlist([]);
+    setUserRatingsState({});
+  };
+
+  // Let the user replay the intro from Settings.
+  const resetOnboarding = () => {
+    if (!hydrated) return;
+    setOnboardingSeen(false);
+  };
+
   return (
     <AppContext.Provider
       value={{
@@ -251,6 +268,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         isRecentlyRandom,
         onboardingSeen,
         markOnboardingSeen,
+        clearWatchlist,
+        resetOnboarding,
       }}
     >
       {children}

@@ -8,7 +8,6 @@ import {
   StyleSheet,
   Text,
   TouchableOpacity,
-  useWindowDimensions,
   View,
 } from 'react-native';
 import PaginationBar from '../components/PaginationBar';
@@ -17,6 +16,8 @@ import { MovieCardSkeleton } from '../components/Skeleton';
 import { itemToMovie } from '../utils/tmdb';
 import { makeTmdbFetch } from '../utils/api';
 import { tmdbUrls, tmdbHeaders } from '../utils/tmdbApi';
+import { useGridColumns } from '../utils/useGridColumns';
+import { colors, gradients, radii } from '../constants/theme';
 
 const PAGE_SIZE = 20;
 const SKELETON_KEYS = [1, 2, 3, 4, 5, 6];
@@ -64,8 +65,7 @@ const TYPE_OPTS: { key: TypeFilter; label: string }[] = [
 
 export default function ActorScreen({ route, navigation }: any) {
   const { personId, name } = route.params;
-  const { width } = useWindowDimensions();
-  const cardWidth = useMemo(() => (width - 48) / 2, [width]);
+  const { columns, cardWidth } = useGridColumns();
   const [person, setPerson] = useState<any>(null);
   const [cast, setCast] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
@@ -125,6 +125,12 @@ export default function ActorScreen({ route, navigation }: any) {
     setActorPage(1);
   };
 
+  const resetFilmographyFilters = () => {
+    setTypeFilter('all');
+    setSortBy('popularity');
+    setActorPage(1);
+  };
+
   const openCard = (item: any) => {
     // push, not navigate: Actor sits above a Card in the stack, so navigate
     // would pop back to that existing Card (which ignores param changes)
@@ -133,6 +139,7 @@ export default function ActorScreen({ route, navigation }: any) {
   };
 
   const bio = person?.biography || '';
+  const hasActiveFilmographyFilters = typeFilter !== 'all' || sortBy !== 'popularity';
   const bioShort = (() => {
     if (bio.length <= 220) return bio;
     const cut = bio.slice(0, 220);
@@ -151,7 +158,7 @@ export default function ActorScreen({ route, navigation }: any) {
         />
       ) : (
         <View style={[styles.photo, styles.photoFallback]}>
-          <Ionicons name="person" size={48} color="#555" />
+          <Ionicons name="person" size={48} color={colors.faint} />
         </View>
       )}
 
@@ -211,9 +218,9 @@ export default function ActorScreen({ route, navigation }: any) {
   );
 
   return (
-    <LinearGradient colors={['#0f0f1a', '#1a1a2e']} style={styles.container}>
+    <LinearGradient colors={gradients.app} style={styles.container}>
       <TouchableOpacity style={styles.back} onPress={() => navigation.goBack()}>
-        <Ionicons name="chevron-back" size={20} color="#aaa" />
+        <Ionicons name="chevron-back" size={20} color={colors.textSoft} />
         <Text style={styles.backText}>Назад</Text>
       </TouchableOpacity>
 
@@ -221,14 +228,15 @@ export default function ActorScreen({ route, navigation }: any) {
         <FlatList
           data={SKELETON_KEYS}
           keyExtractor={i => String(i)}
-          numColumns={2}
+          key={`grid-${columns}`}
+          numColumns={columns}
           contentContainerStyle={styles.grid}
           columnWrapperStyle={styles.row}
           renderItem={() => <MovieCardSkeleton cardWidth={cardWidth} />}
         />
       ) : error ? (
         <View style={styles.errorBox}>
-          <Ionicons name="cloud-offline-outline" size={42} color="#555" />
+          <Ionicons name="cloud-offline-outline" size={42} color={colors.faint} />
           <Text style={styles.errorText}>{error}</Text>
           <TouchableOpacity style={styles.retryBtn} onPress={() => setRetryToken(t => t + 1)}>
             <Text style={styles.retryText}>Повторить</Text>
@@ -238,22 +246,38 @@ export default function ActorScreen({ route, navigation }: any) {
         <FlatList
           data={pagedCast}
           keyExtractor={(item, i) => `${item.id}-${item.media_type}-${i}`}
-          numColumns={2}
+          key={`grid-${columns}`}
+          numColumns={columns}
           contentContainerStyle={styles.grid}
           columnWrapperStyle={styles.row}
           ListHeaderComponent={ListHeader}
           ListEmptyComponent={
             <View style={styles.empty}>
-              <Text style={styles.emptyText}>Нет результатов</Text>
+              <Ionicons name={cast.length > 0 ? 'filter-outline' : 'film-outline'} size={36} color={colors.faint} />
+              <Text style={styles.emptyText}>
+                {cast.length > 0 ? 'Под эти фильтры ничего не найдено' : 'Фильмография не найдена'}
+              </Text>
+              <Text style={styles.emptyHint}>
+                {cast.length > 0
+                  ? 'Попробуй показать и фильмы, и сериалы или вернуться к сортировке по популярности.'
+                  : 'В TMDB пока нет тайтлов с постерами для этого актёра.'}
+              </Text>
+              {cast.length > 0 && hasActiveFilmographyFilters && (
+                <TouchableOpacity style={styles.emptyBtn} onPress={resetFilmographyFilters}>
+                  <Text style={styles.emptyBtnText}>Сбросить фильтры</Text>
+                </TouchableOpacity>
+              )}
             </View>
           }
           ListFooterComponent={
-            <PaginationBar
-              currentPage={actorPage}
-              totalPages={totalActorPages}
-              totalResults={filteredCast.length}
-              onPageChange={setActorPage}
-            />
+            filteredCast.length > PAGE_SIZE ? (
+              <PaginationBar
+                currentPage={actorPage}
+                totalPages={totalActorPages}
+                totalResults={filteredCast.length}
+                onPageChange={setActorPage}
+              />
+            ) : null
           }
           renderItem={({ item }) => (
             <PosterCard item={item} cardWidth={cardWidth} onPress={() => openCard(item)}>
@@ -276,32 +300,35 @@ export default function ActorScreen({ route, navigation }: any) {
 const styles = StyleSheet.create({
   container: { flex: 1 },
   back: { flexDirection: 'row', alignItems: 'center', gap: 4, paddingTop: 60, paddingHorizontal: 20, paddingBottom: 8 },
-  backText: { color: '#aaa', fontSize: 14 },
+  backText: { color: colors.textSoft, fontSize: 14, fontWeight: '700' },
   header: { alignItems: 'center', paddingHorizontal: 16, paddingBottom: 16 },
   photo: { width: 140, height: 140, borderRadius: 70, marginBottom: 16 },
-  photoFallback: { backgroundColor: '#1e1e30', alignItems: 'center', justifyContent: 'center' },
-  name: { fontSize: 22, fontWeight: '800', color: '#fff', textAlign: 'center', marginBottom: 6 },
-  meta: { fontSize: 13, color: '#777', textAlign: 'center', marginBottom: 12 },
+  photoFallback: { backgroundColor: colors.surfaceElevated, alignItems: 'center', justifyContent: 'center' },
+  name: { fontSize: 22, fontWeight: '900', color: colors.text, textAlign: 'center', marginBottom: 6 },
+  meta: { fontSize: 13, color: colors.muted2, textAlign: 'center', marginBottom: 12 },
   bioBlock: { width: '100%', marginBottom: 16 },
-  bioText: { color: '#bbb', fontSize: 14, lineHeight: 22, textAlign: 'center' },
-  bioToggle: { color: '#8888ff', fontSize: 13, textAlign: 'center', marginTop: 6 },
-  sectionTitle: { fontSize: 17, fontWeight: '700', color: '#fff', alignSelf: 'flex-start', marginTop: 4, marginBottom: 12 },
+  bioText: { color: colors.textSoft, fontSize: 14, lineHeight: 22, textAlign: 'center' },
+  bioToggle: { color: colors.accent, fontSize: 13, textAlign: 'center', marginTop: 6, fontWeight: '700' },
+  sectionTitle: { fontSize: 17, fontWeight: '800', color: colors.text, alignSelf: 'flex-start', marginTop: 4, marginBottom: 12 },
   controlsRow: { width: '100%', marginBottom: 8 },
   chipRow: { flexDirection: 'row', gap: 8, paddingBottom: 4 },
-  chip: { paddingHorizontal: 12, paddingVertical: 7, borderRadius: 16, borderWidth: 1, borderColor: '#333' },
-  chipActive: { backgroundColor: '#e50914', borderColor: '#e50914' },
-  chipSortActive: { backgroundColor: '#1e1e40', borderColor: '#8888ff' },
-  chipText: { color: '#666', fontSize: 12 },
-  chipTextActive: { color: '#fff', fontWeight: '600' },
-  chipSortTextActive: { color: '#8888ff', fontWeight: '600' },
+  chip: { paddingHorizontal: 12, paddingVertical: 7, borderRadius: radii.pill, borderWidth: 1, borderColor: colors.borderSoft, backgroundColor: colors.surface },
+  chipActive: { backgroundColor: colors.primary, borderColor: colors.primary },
+  chipSortActive: { backgroundColor: colors.accentSoft, borderColor: colors.accent },
+  chipText: { color: colors.muted, fontSize: 12, fontWeight: '600' },
+  chipTextActive: { color: colors.text, fontWeight: '800' },
+  chipSortTextActive: { color: colors.textSoft, fontWeight: '800' },
   grid: { paddingHorizontal: 12, paddingBottom: 32 },
   row: { justifyContent: 'space-between', marginBottom: 12 },
-  cardRating: { color: '#aaa', fontSize: 11 },
-  cardYear: { color: '#888', fontSize: 11 },
-  empty: { alignItems: 'center', paddingTop: 40 },
-  emptyText: { color: '#888', fontSize: 14 },
+  cardRating: { color: colors.muted, fontSize: 11 },
+  cardYear: { color: colors.muted2, fontSize: 11 },
+  empty: { alignItems: 'center', paddingTop: 40, paddingHorizontal: 24 },
+  emptyText: { color: colors.textSoft, fontSize: 15, textAlign: 'center', marginTop: 10, fontWeight: '700' },
+  emptyHint: { color: colors.muted2, fontSize: 13, textAlign: 'center', lineHeight: 19, marginTop: 4 },
+  emptyBtn: { backgroundColor: colors.accentSoft, borderWidth: 1, borderColor: colors.border, paddingHorizontal: 18, paddingVertical: 10, borderRadius: radii.pill, marginTop: 14 },
+  emptyBtnText: { color: colors.textSoft, fontSize: 13, fontWeight: '800' },
   errorBox: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 12, paddingHorizontal: 24 },
-  errorText: { color: '#aaa', fontSize: 14, textAlign: 'center' },
-  retryBtn: { backgroundColor: '#e50914', paddingHorizontal: 24, paddingVertical: 10, borderRadius: 20, marginTop: 6 },
-  retryText: { color: '#fff', fontWeight: '700', fontSize: 14 },
+  errorText: { color: colors.textSoft, fontSize: 14, textAlign: 'center' },
+  retryBtn: { backgroundColor: colors.primary, paddingHorizontal: 24, paddingVertical: 10, borderRadius: radii.pill, marginTop: 6 },
+  retryText: { color: colors.text, fontWeight: '800', fontSize: 14 },
 });

@@ -13,7 +13,6 @@ import {
   Text,
   TextInput,
   TouchableOpacity,
-  useWindowDimensions,
   View,
 } from 'react-native';
 import PaginationBar from '../components/PaginationBar';
@@ -26,6 +25,9 @@ import { MOVIE_GENRES, TV_GENRES, COUNTRIES, LANGUAGES, RATINGS, MAX_RATINGS, SO
 import { HorizontalCardSkeleton, MovieCardSkeleton } from '../components/Skeleton';
 import { useAppContext } from '../store/AppContext';
 import { tmdbUrls, tmdbHeaders, pickRandomDiscoverItem } from '../utils/tmdbApi';
+import { useGridColumns } from '../utils/useGridColumns';
+import { tapMedium } from '../utils/haptics';
+import { colors, gradients, radii, shadow } from '../constants/theme';
 
 const CONTENT_TYPES = [
   { key: 'all', name: 'Фильмы и сериалы' },
@@ -242,9 +244,9 @@ function FilterSheet({ visible, onClose, filters, onApply }: any) {
 
             <Text style={fStyles.label}>Год выпуска</Text>
             <View style={fStyles.yearRow}>
-              <TextInput style={fStyles.yearInput} placeholder="От" placeholderTextColor="#777" value={local.yearFrom} onChangeText={v => setLocal({ ...local, yearFrom: v })} keyboardType="numeric" maxLength={4} />
+              <TextInput style={fStyles.yearInput} placeholder="От" placeholderTextColor={colors.muted2} value={local.yearFrom} onChangeText={v => setLocal({ ...local, yearFrom: v })} keyboardType="numeric" maxLength={4} />
               <Text style={fStyles.yearDash}>-</Text>
-              <TextInput style={fStyles.yearInput} placeholder="До" placeholderTextColor="#777" value={local.yearTo} onChangeText={v => setLocal({ ...local, yearTo: v })} keyboardType="numeric" maxLength={4} />
+              <TextInput style={fStyles.yearInput} placeholder="До" placeholderTextColor={colors.muted2} value={local.yearTo} onChangeText={v => setLocal({ ...local, yearTo: v })} keyboardType="numeric" maxLength={4} />
             </View>
 
             <Text style={fStyles.label}>Минимальный рейтинг</Text>
@@ -335,6 +337,7 @@ export default function CatalogScreen({ navigation }: any) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [selectedGenres, setSelectedGenres] = useState<number[]>([0]);
+  const [localRandomGenres, setLocalRandomGenres] = useState<number[]>([0]);
   const [preciseFilters, setPreciseFilters] = useState(defaultPreciseFilters);
   const [localPreciseFilters, setLocalPreciseFilters] = useState(defaultPreciseFilters);
   const [showPreciseFilters, setShowPreciseFilters] = useState(false);
@@ -357,8 +360,24 @@ export default function CatalogScreen({ navigation }: any) {
   const activeFiltersRef = useRef(defaultFilters);
   const resultsListRef = useRef<FlatList>(null);
   const genres = mediaType === 'tv' ? TV_GENRES : MOVIE_GENRES;
-  const { width } = useWindowDimensions();
-  const cardWidth = useMemo(() => (width - 48) / 2, [width]);
+  const { columns, cardWidth } = useGridColumns();
+  const randomSummary = useMemo(() => {
+    const pickedGenres = selectedGenres.filter(id => id !== 0);
+    const genreNames = pickedGenres
+      .map(id => genres.find(g => g.id === id)?.name)
+      .filter(Boolean);
+    const filterBits = [
+      preciseFilters.yearFrom || preciseFilters.yearTo
+        ? `${preciseFilters.yearFrom || '...'}-${preciseFilters.yearTo || '...'}`
+        : '',
+      preciseFilters.minRating > 0 ? `рейтинг ${preciseFilters.minRating}+` : '',
+      preciseFilters.maxRating < 10 ? `до ${preciseFilters.maxRating}` : '',
+      preciseFilters.country
+        ? COUNTRIES.find(c => c.code === preciseFilters.country)?.name
+        : '',
+    ].filter(Boolean);
+    return [...(genreNames.length ? genreNames : ['все жанры']), ...filterBits].join(' · ');
+  }, [selectedGenres, preciseFilters, genres]);
 
   const scrollResultsToTop = useCallback(() => {
     requestAnimationFrame(() => {
@@ -368,16 +387,26 @@ export default function CatalogScreen({ navigation }: any) {
 
   const openPreciseFilters = () => {
     setLocalPreciseFilters(preciseFilters);
+    setLocalRandomGenres(selectedGenres);
     setShowPreciseFilters(true);
   };
 
-  const applyPreciseFilters = (next = localPreciseFilters) => {
-    setPreciseFilters(next);
+  const applyPreciseFilters = (next = localPreciseFilters, nextGenres = localRandomGenres) => {
+    const normalized = { ...next };
+    if (normalized.minRating > normalized.maxRating) normalized.maxRating = 10;
+    const years = sanitizeYearRange(normalized.yearFrom, normalized.yearTo);
+    normalized.yearFrom = years.yearFrom;
+    normalized.yearTo = years.yearTo;
+    setPreciseFilters(normalized);
+    setSelectedGenres(nextGenres.length ? nextGenres : [0]);
     setShowPreciseFilters(false);
   };
 
   const closePreciseFilters = () => {
-    if (areFiltersEqual(localPreciseFilters, preciseFilters)) {
+    if (
+      areFiltersEqual(localPreciseFilters, preciseFilters) &&
+      localRandomGenres.join(',') === selectedGenres.join(',')
+    ) {
       setShowPreciseFilters(false);
       return;
     }
@@ -386,6 +415,18 @@ export default function CatalogScreen({ navigation }: any) {
       { text: 'Не применять', style: 'destructive', onPress: () => setShowPreciseFilters(false) },
       { text: 'Применить', onPress: () => applyPreciseFilters() },
     ]);
+  };
+
+  const toggleLocalGenre = (id: number) => {
+    if (id === 0) { setLocalRandomGenres([0]); return; }
+    setLocalRandomGenres(prev => {
+      const without0 = prev.filter(g => g !== 0);
+      if (without0.includes(id)) {
+        const next = without0.filter(g => g !== id);
+        return next.length === 0 ? [0] : next;
+      }
+      return [...without0, id];
+    });
   };
 
   const loadTrending = useCallback(async (mt: string, page: number, append: boolean) => {
@@ -574,6 +615,7 @@ export default function CatalogScreen({ navigation }: any) {
 
   const openRandom = async () => {
     if (loading) return;
+    tapMedium();
     const fp = { ...preciseFilters };
     if (fp.minRating > fp.maxRating) fp.maxRating = 10;
     const years = sanitizeYearRange(fp.yearFrom, fp.yearTo);
@@ -591,22 +633,8 @@ export default function CatalogScreen({ navigation }: any) {
     setLoading(false);
   };
 
-  const toggleGenre = (id: number) => {
-    if (id === 0) { setSelectedGenres([0]); return; }
-    setSelectedGenres(prev => {
-      const without0 = prev.filter(g => g !== 0);
-      if (without0.includes(id)) {
-        const next = without0.filter(g => g !== id);
-        return next.length === 0 ? [0] : next;
-      }
-      return [...without0, id];
-    });
-  };
-
-  const isAllGenres = selectedGenres.includes(0);
-
   return (
-    <LinearGradient colors={['#0f0f1a', '#1a1a2e']} style={styles.container}>
+    <LinearGradient colors={gradients.app} style={styles.container}>
       <View style={styles.header}>
         {!isSearchMode && (
           <View style={styles.switcher}>
@@ -614,14 +642,14 @@ export default function CatalogScreen({ navigation }: any) {
               style={[styles.switchBtn, mediaType === 'movie' && styles.switchBtnActive]}
               onPress={() => { setMediaType('movie'); setSelectedGenres([0]); }}
             >
-              <Ionicons name="film" size={16} color={mediaType === 'movie' ? '#fff' : '#666'} />
+              <Ionicons name="film" size={16} color={mediaType === 'movie' ? colors.text : colors.muted2} />
               <Text style={[styles.switchText, mediaType === 'movie' && styles.switchTextActive]}>Фильмы</Text>
             </TouchableOpacity>
             <TouchableOpacity
               style={[styles.switchBtn, mediaType === 'tv' && styles.switchBtnActive]}
               onPress={() => { setMediaType('tv'); setSelectedGenres([0]); }}
             >
-              <Ionicons name="tv" size={16} color={mediaType === 'tv' ? '#fff' : '#666'} />
+              <Ionicons name="tv" size={16} color={mediaType === 'tv' ? colors.text : colors.muted2} />
               <Text style={[styles.switchText, mediaType === 'tv' && styles.switchTextActive]}>Сериалы</Text>
             </TouchableOpacity>
           </View>
@@ -629,23 +657,32 @@ export default function CatalogScreen({ navigation }: any) {
 
         <View style={styles.searchRow}>
           <View style={styles.searchInputWrap}>
-            <Ionicons name="search" size={16} color="#555" style={styles.searchIcon} />
+            <Ionicons name="search" size={16} color={colors.muted2} style={styles.searchIcon} />
             <TextInput
               style={styles.searchInput}
               placeholder="Поиск фильмов и сериалов..."
-              placeholderTextColor="#777"
+              placeholderTextColor={colors.muted2}
               value={searchQuery}
               onChangeText={setSearchQuery}
               returnKeyType="search"
             />
             {searchQuery.length > 0 && (
-              <TouchableOpacity onPress={clearSearchMode}>
-                <Ionicons name="close-circle" size={16} color="#555" />
+              <TouchableOpacity
+                onPress={clearSearchMode}
+                accessibilityRole="button"
+                accessibilityLabel="Очистить поиск"
+              >
+                <Ionicons name="close-circle" size={16} color={colors.muted2} />
               </TouchableOpacity>
             )}
           </View>
-          <TouchableOpacity style={styles.filterBtn} onPress={() => setShowFilters(true)}>
-            <Ionicons name="options" size={20} color="#fff" />
+          <TouchableOpacity
+            style={styles.filterBtn}
+            onPress={() => setShowFilters(true)}
+            accessibilityRole="button"
+            accessibilityLabel="Открыть фильтры"
+          >
+            <Ionicons name="options" size={20} color={colors.text} />
           </TouchableOpacity>
         </View>
       </View>
@@ -654,7 +691,7 @@ export default function CatalogScreen({ navigation }: any) {
         <View style={{ flex: 1 }}>
           <View style={styles.resultsHeader}>
             <TouchableOpacity style={styles.resultsBackBtn} onPress={clearSearchMode}>
-              <Ionicons name="chevron-back" size={18} color="#8888ff" />
+              <Ionicons name="chevron-back" size={18} color={colors.accent} />
               <Text style={styles.resultsBackText}>Назад к каталогу</Text>
             </TouchableOpacity>
             <Text style={styles.resultsTitle}>
@@ -671,14 +708,15 @@ export default function CatalogScreen({ navigation }: any) {
             <FlatList
               data={SKELETON_KEYS}
               keyExtractor={item => String(item)}
-              numColumns={2}
+              key={`grid-${columns}`}
+              numColumns={columns}
               contentContainerStyle={styles.grid}
               columnWrapperStyle={styles.row}
               renderItem={() => <MovieCardSkeleton cardWidth={cardWidth} />}
             />
           ) : error ? (
             <View style={styles.empty}>
-              <Ionicons name="cloud-offline-outline" size={38} color="#555" />
+              <Ionicons name="cloud-offline-outline" size={38} color={colors.faint} />
               <Text style={styles.emptyText}>{error}</Text>
               <TouchableOpacity style={styles.searchRetryBtn} onPress={() => handlePageChange(currentPage)}>
                 <Text style={styles.searchRetryText}>Повторить</Text>
@@ -686,16 +724,20 @@ export default function CatalogScreen({ navigation }: any) {
             </View>
           ) : searchResults.length === 0 ? (
             <View style={styles.empty}>
-              <Ionicons name="search-outline" size={38} color="#555" />
+              <Ionicons name="search-outline" size={38} color={colors.faint} />
               <Text style={styles.emptyText}>Ничего не найдено</Text>
               <Text style={styles.emptyHint}>Попробуй смягчить фильтры или изменить запрос.</Text>
+              <TouchableOpacity style={styles.searchRetryBtn} onPress={clearSearchMode}>
+                <Text style={styles.searchRetryText}>Сбросить поиск</Text>
+              </TouchableOpacity>
             </View>
           ) : (
             <FlatList
               ref={resultsListRef}
               data={searchResults}
               keyExtractor={(item) => `${item.media_type || mediaType}-${item.id}`}
-              numColumns={2}
+              key={`grid-${columns}`}
+              numColumns={columns}
               contentContainerStyle={styles.grid}
               columnWrapperStyle={styles.row}
               renderItem={({ item }) => (
@@ -718,70 +760,57 @@ export default function CatalogScreen({ navigation }: any) {
       ) : (
         <ScrollView
           contentContainerStyle={styles.scroll}
-          refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#e50914" />}
+          refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.primary} />}
         >
-          <Text style={styles.sectionTitle}>Рулетка</Text>
-          <Text style={styles.sectionSubtitle}>Выбери жанры и крути — подберём случайный тайтл</Text>
-
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 12 }}>
-            <View style={styles.genreRow}>
-              {genres.map(g => (
-                <TouchableOpacity
-                  key={g.id}
-                  style={[
-                    styles.genreChip,
-                    (g.id === 0 ? isAllGenres : selectedGenres.includes(g.id)) && styles.genreChipActive,
-                  ]}
-                  onPress={() => toggleGenre(g.id)}
-                >
-                  <Text
-                    style={[
-                      styles.genreChipText,
-                      (g.id === 0 ? isAllGenres : selectedGenres.includes(g.id)) && styles.genreChipTextActive,
-                    ]}
-                  >
-                    {g.name}
-                  </Text>
-                </TouchableOpacity>
-              ))}
+          <View style={styles.roulettePanel}>
+            <View style={styles.rouletteTopRow}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.sectionTitle}>Рулетка</Text>
+                <Text style={styles.sectionSubtitle}>Быстрый выбор, когда не хочется листать каталог</Text>
+              </View>
+              <TouchableOpacity style={styles.rouletteSettingsBtn} onPress={openPreciseFilters}>
+                <Ionicons name="options" size={17} color={colors.accent} />
+                <Text style={styles.rouletteSettingsText}>Настроить</Text>
+              </TouchableOpacity>
             </View>
-          </ScrollView>
 
-          <TouchableOpacity style={styles.preciseRow} onPress={openPreciseFilters}>
-            <View>
-              <Text style={styles.preciseTitle}>Подобрать точнее</Text>
-              <Text style={styles.preciseSubtitle}>Год, рейтинг, страна — для рулетки</Text>
+            <View style={styles.rouletteSummary}>
+              <Ionicons name="filter-outline" size={15} color={colors.muted} />
+              <Text style={styles.rouletteSummaryText} numberOfLines={2}>{randomSummary}</Text>
             </View>
-            <Ionicons name="chevron-forward" size={18} color="#888" />
-          </TouchableOpacity>
 
-          {error ? (
-            <View style={styles.errorBox}>
-              <Text style={styles.errorText}>{error}</Text>
-            </View>
-          ) : null}
+            {error ? (
+              <View style={styles.errorBox}>
+                <Text style={styles.errorText}>{error}</Text>
+              </View>
+            ) : null}
 
-          {loading ? (
-            <ActivityIndicator size="large" color="#e50914" style={{ marginTop: 16 }} />
-          ) : (
-            <TouchableOpacity style={styles.randomBtn} onPress={openRandom}>
-              <Ionicons name="shuffle" size={20} color="#fff" />
-              <Text style={styles.randomText}>Случайный {mediaType === 'movie' ? 'фильм' : 'сериал'}</Text>
-            </TouchableOpacity>
-          )}
+            {loading ? (
+              <View style={styles.randomLoading}>
+                <ActivityIndicator size="small" color={colors.primary} />
+                <Text style={styles.randomLoadingText}>Подбираю тайтл...</Text>
+              </View>
+            ) : (
+              <TouchableOpacity style={styles.randomBtn} onPress={openRandom}>
+                <Ionicons name="shuffle" size={20} color={colors.text} />
+                <Text style={styles.randomText}>Случайный {mediaType === 'movie' ? 'фильм' : 'сериал'}</Text>
+              </TouchableOpacity>
+            )}
+          </View>
 
-          <TouchableOpacity style={styles.cinemaCard} onPress={() => navigation.navigate('Cinema')}>
+          <TouchableOpacity style={styles.cinemaCardCompact} onPress={() => navigation.navigate('Cinema')}>
             <View style={styles.cinemaIcon}>
-              <Ionicons name="film" size={22} color="#fff" />
+              <Ionicons name="film" size={22} color={colors.text} />
             </View>
             <View style={{ flex: 1 }}>
               <Text style={styles.cinemaTitle}>Сейчас в кино · Актобе</Text>
               <Text style={styles.cinemaSubtitle}>Расписание сеансов на сегодня и завтра</Text>
             </View>
-            <Ionicons name="chevron-forward" size={18} color="#888" />
+            <Ionicons name="chevron-forward" size={18} color={colors.muted} />
           </TouchableOpacity>
 
-          <Text style={[styles.sectionTitle, { marginTop: 28 }]}>Новинки недели</Text>
+          <Text style={[styles.sectionTitle, { marginTop: 24 }]}>Можно выбрать вручную</Text>
+          <Text style={styles.sectionSubtitle}>Новинки недели, если хочется просто полистать</Text>
 
           {trendingLoading ? (
             <FlatList
@@ -835,13 +864,29 @@ export default function CatalogScreen({ navigation }: any) {
         <TouchableOpacity style={fStyles.overlay} activeOpacity={1} onPress={closePreciseFilters}>
           <TouchableOpacity activeOpacity={1} style={fStyles.sheet}>
             <View style={fStyles.handle} />
-            <Text style={fStyles.title}>Подобрать точнее</Text>
+            <Text style={fStyles.title}>Настроить рулетку</Text>
             <ScrollView showsVerticalScrollIndicator={false}>
+              <Text style={fStyles.label}>Жанры</Text>
+              <View style={fStyles.genreGrid}>
+                {genres.map(g => {
+                  const active = g.id === 0 ? localRandomGenres.includes(0) : localRandomGenres.includes(g.id);
+                  return (
+                    <TouchableOpacity
+                      key={g.id}
+                      style={[fStyles.chip, active && fStyles.chipActive]}
+                      onPress={() => toggleLocalGenre(g.id)}
+                    >
+                      <Text style={[fStyles.chipText, active && fStyles.chipTextActive]}>{g.name}</Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+
               <Text style={fStyles.label}>Год выпуска</Text>
               <View style={fStyles.yearRow}>
-                <TextInput style={fStyles.yearInput} placeholder="От" placeholderTextColor="#777" value={localPreciseFilters.yearFrom} onChangeText={v => setLocalPreciseFilters(p => ({ ...p, yearFrom: v }))} keyboardType="numeric" maxLength={4} />
+                <TextInput style={fStyles.yearInput} placeholder="От" placeholderTextColor={colors.muted2} value={localPreciseFilters.yearFrom} onChangeText={v => setLocalPreciseFilters(p => ({ ...p, yearFrom: v }))} keyboardType="numeric" maxLength={4} />
                 <Text style={fStyles.yearDash}>-</Text>
-                <TextInput style={fStyles.yearInput} placeholder="До" placeholderTextColor="#777" value={localPreciseFilters.yearTo} onChangeText={v => setLocalPreciseFilters(p => ({ ...p, yearTo: v }))} keyboardType="numeric" maxLength={4} />
+                <TextInput style={fStyles.yearInput} placeholder="До" placeholderTextColor={colors.muted2} value={localPreciseFilters.yearTo} onChangeText={v => setLocalPreciseFilters(p => ({ ...p, yearTo: v }))} keyboardType="numeric" maxLength={4} />
               </View>
 
               <Text style={fStyles.label}>Минимальный рейтинг</Text>
@@ -878,7 +923,13 @@ export default function CatalogScreen({ navigation }: any) {
               </ScrollView>
 
               <View style={fStyles.buttons}>
-                <TouchableOpacity style={fStyles.resetBtn} onPress={() => setLocalPreciseFilters(defaultPreciseFilters)}>
+                <TouchableOpacity
+                  style={fStyles.resetBtn}
+                  onPress={() => {
+                    setLocalPreciseFilters(defaultPreciseFilters);
+                    setLocalRandomGenres([0]);
+                  }}
+                >
                   <Text style={fStyles.resetText}>Сбросить</Text>
                 </TouchableOpacity>
                 <TouchableOpacity style={fStyles.applyBtn} onPress={() => applyPreciseFilters()}>
@@ -895,75 +946,76 @@ export default function CatalogScreen({ navigation }: any) {
 
 const styles = StyleSheet.create({
   container: { flex: 1 },
-  header: { paddingTop: 60, paddingHorizontal: 16, paddingBottom: 12, backgroundColor: '#0f0f1a' },
-  switcher: { flexDirection: 'row', backgroundColor: '#1e1e30', borderRadius: 14, padding: 3, marginBottom: 12 },
-  switchBtn: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, paddingVertical: 8, borderRadius: 11 },
-  switchBtnActive: { backgroundColor: '#e50914' },
-  switchText: { color: '#666', fontWeight: '600', fontSize: 14 },
-  switchTextActive: { color: '#fff' },
+  header: { paddingTop: 60, paddingHorizontal: 16, paddingBottom: 12, backgroundColor: colors.bg },
+  switcher: { flexDirection: 'row', backgroundColor: colors.surface, borderRadius: radii.lg, padding: 4, marginBottom: 12, borderWidth: 1, borderColor: colors.borderSoft },
+  switchBtn: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, paddingVertical: 9, borderRadius: radii.md },
+  switchBtnActive: { backgroundColor: colors.primary },
+  switchText: { color: colors.muted2, fontWeight: '700', fontSize: 14 },
+  switchTextActive: { color: colors.text },
   searchRow: { flexDirection: 'row', gap: 10, alignItems: 'center' },
-  searchInputWrap: { flex: 1, flexDirection: 'row', alignItems: 'center', backgroundColor: '#1e1e30', borderRadius: 12, paddingHorizontal: 12, height: 44 },
+  searchInputWrap: { flex: 1, flexDirection: 'row', alignItems: 'center', backgroundColor: colors.surfaceElevated, borderRadius: radii.md, paddingHorizontal: 12, height: 44, borderWidth: 1, borderColor: colors.borderSoft },
   searchIcon: { marginRight: 8 },
-  searchInput: { flex: 1, color: '#fff', fontSize: 14 },
-  filterBtn: { backgroundColor: '#1e1e30', width: 44, height: 44, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
+  searchInput: { flex: 1, color: colors.text, fontSize: 14 },
+  filterBtn: { backgroundColor: colors.surfaceElevated, width: 44, height: 44, borderRadius: radii.md, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: colors.borderSoft },
   resultsHeader: { paddingHorizontal: 16, paddingTop: 12, paddingBottom: 8 },
   resultsBackBtn: { flexDirection: 'row', alignItems: 'center', gap: 4, marginBottom: 8 },
-  resultsBackText: { color: '#8888ff', fontSize: 14, fontWeight: '600' },
-  resultsTitle: { color: '#fff', fontSize: 18, fontWeight: '700' },
-  resultsCaption: { color: '#666', fontSize: 11, marginTop: 4 },
+  resultsBackText: { color: colors.accent, fontSize: 14, fontWeight: '700' },
+  resultsTitle: { color: colors.text, fontSize: 18, fontWeight: '800' },
+  resultsCaption: { color: colors.muted2, fontSize: 11, marginTop: 4 },
   scroll: { padding: 16 },
-  sectionTitle: { fontSize: 18, fontWeight: '700', color: '#fff', marginBottom: 12, marginTop: 8 },
-  sectionSubtitle: { color: '#888', fontSize: 13, marginTop: -6, marginBottom: 14 },
+  sectionTitle: { fontSize: 18, fontWeight: '800', color: colors.text, marginBottom: 12, marginTop: 8 },
+  sectionSubtitle: { color: colors.muted, fontSize: 13, marginTop: -6, marginBottom: 14 },
+  roulettePanel: { backgroundColor: colors.surfaceElevated, borderWidth: 1, borderColor: colors.border, borderRadius: radii.lg, padding: 16, marginBottom: 14, ...shadow.card },
+  rouletteTopRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 12, marginBottom: 4 },
+  rouletteSettingsBtn: { flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: colors.accentSoft, borderWidth: 1, borderColor: colors.border, paddingHorizontal: 12, paddingVertical: 8, borderRadius: radii.pill },
+  rouletteSettingsText: { color: colors.textSoft, fontSize: 12, fontWeight: '800' },
+  rouletteSummary: { flexDirection: 'row', alignItems: 'center', gap: 7, backgroundColor: colors.bgSoft, borderRadius: radii.md, padding: 10, marginBottom: 12 },
+  rouletteSummaryText: { color: colors.textSoft, fontSize: 12, flex: 1, lineHeight: 17 },
+  randomLoading: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, paddingVertical: 16 },
+  randomLoadingText: { color: colors.textSoft, fontSize: 13, fontWeight: '700' },
   trendCard: { width: 120, marginRight: 10 },
-  trendImage: { width: 120, height: 180, borderRadius: 10, marginBottom: 6 },
-  trendTitle: { color: '#ccc', fontSize: 11, textAlign: 'center' },
-  genreRow: { flexDirection: 'row', gap: 8, paddingRight: 16 },
-  genreChip: { borderWidth: 1, borderColor: '#333', paddingHorizontal: 14, paddingVertical: 8, borderRadius: 20 },
-  genreChipActive: { backgroundColor: '#e50914', borderColor: '#e50914' },
-  genreChipText: { color: '#666', fontSize: 13 },
-  genreChipTextActive: { color: '#fff', fontWeight: '600' },
-  cinemaCard: { flexDirection: 'row', alignItems: 'center', gap: 12, backgroundColor: '#1e1e40', borderWidth: 1, borderColor: '#3a3a66', borderRadius: 14, padding: 14, marginTop: 24 },
-  cinemaIcon: { width: 42, height: 42, borderRadius: 12, backgroundColor: '#e50914', alignItems: 'center', justifyContent: 'center' },
-  cinemaTitle: { color: '#fff', fontSize: 15, fontWeight: '700' },
-  cinemaSubtitle: { color: '#9a9ad0', fontSize: 12, marginTop: 2 },
-  preciseRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', backgroundColor: '#1e1e30', borderRadius: 14, padding: 16, marginBottom: 12, marginTop: 4 },
-  preciseTitle: { color: '#fff', fontSize: 15, fontWeight: '600' },
-  preciseSubtitle: { color: '#555', fontSize: 12, marginTop: 2 },
-  errorBox: { backgroundColor: '#2a0a0a', borderRadius: 12, padding: 12, marginBottom: 12 },
-  errorText: { color: '#e50914', fontSize: 13, textAlign: 'center' },
-  randomBtn: { backgroundColor: '#e50914', paddingVertical: 16, borderRadius: 30, alignItems: 'center', flexDirection: 'row', justifyContent: 'center', gap: 8, marginTop: 4 },
-  randomText: { color: '#fff', fontWeight: '700', fontSize: 16 },
+  trendImage: { width: 120, height: 180, borderRadius: radii.md, marginBottom: 6, backgroundColor: colors.surface },
+  trendTitle: { color: colors.textSoft, fontSize: 11, textAlign: 'center', fontWeight: '600' },
+  cinemaCardCompact: { flexDirection: 'row', alignItems: 'center', gap: 12, backgroundColor: colors.surfaceElevated, borderWidth: 1, borderColor: colors.borderSoft, borderRadius: radii.lg, padding: 13, marginTop: 10 },
+  cinemaIcon: { width: 42, height: 42, borderRadius: radii.md, backgroundColor: colors.primary, alignItems: 'center', justifyContent: 'center' },
+  cinemaTitle: { color: colors.text, fontSize: 15, fontWeight: '800' },
+  cinemaSubtitle: { color: colors.muted, fontSize: 12, marginTop: 2 },
+  errorBox: { backgroundColor: colors.dangerBg, borderRadius: radii.md, padding: 12, marginBottom: 12, borderWidth: 1, borderColor: colors.primaryDark },
+  errorText: { color: colors.primary, fontSize: 13, textAlign: 'center' },
+  randomBtn: { backgroundColor: colors.primary, paddingVertical: 16, borderRadius: radii.pill, alignItems: 'center', flexDirection: 'row', justifyContent: 'center', gap: 8, marginTop: 4 },
+  randomText: { color: colors.text, fontWeight: '800', fontSize: 16 },
   grid: { padding: 12 },
   row: { justifyContent: 'space-between', marginBottom: 12 },
-  cardRating: { color: '#aaa', fontSize: 11 },
+  cardRating: { color: colors.muted, fontSize: 11, fontWeight: '600' },
   empty: { flex: 1, alignItems: 'center', paddingTop: 80, paddingHorizontal: 24 },
-  emptyText: { color: '#aaa', fontSize: 16, textAlign: 'center', marginTop: 10 },
-  emptyHint: { color: '#555', fontSize: 13, textAlign: 'center', marginTop: 6 },
-  searchRetryBtn: { backgroundColor: '#e50914', paddingHorizontal: 24, paddingVertical: 10, borderRadius: 20, marginTop: 14 },
-  searchRetryText: { color: '#fff', fontWeight: '700', fontSize: 14 },
-  trendingErrorBox: { backgroundColor: '#2a0a0a', borderRadius: 12, padding: 14, marginBottom: 8, alignItems: 'center', gap: 8 },
-  trendingErrorText: { color: '#e50914', fontSize: 13, textAlign: 'center' },
-  trendingRetry: { color: '#fff', fontSize: 13, fontWeight: '700' },
+  emptyText: { color: colors.textSoft, fontSize: 16, textAlign: 'center', marginTop: 10, fontWeight: '700' },
+  emptyHint: { color: colors.muted2, fontSize: 13, textAlign: 'center', marginTop: 6 },
+  searchRetryBtn: { backgroundColor: colors.primary, paddingHorizontal: 24, paddingVertical: 10, borderRadius: radii.pill, marginTop: 14 },
+  searchRetryText: { color: colors.text, fontWeight: '800', fontSize: 14 },
+  trendingErrorBox: { backgroundColor: colors.dangerBg, borderRadius: radii.md, padding: 14, marginBottom: 8, alignItems: 'center', gap: 8, borderWidth: 1, borderColor: colors.primaryDark },
+  trendingErrorText: { color: colors.primary, fontSize: 13, textAlign: 'center' },
+  trendingRetry: { color: colors.text, fontSize: 13, fontWeight: '800' },
 });
 
 const fStyles = StyleSheet.create({
-  overlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'flex-end' },
-  sheet: { backgroundColor: '#1a1a2e', borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 24, paddingBottom: 40, maxHeight: '85%' },
-  handle: { width: 40, height: 4, backgroundColor: '#444', borderRadius: 2, alignSelf: 'center', marginBottom: 20 },
-  title: { fontSize: 20, fontWeight: 'bold', color: '#fff', marginBottom: 6 },
-  caption: { color: '#888', fontSize: 12, marginBottom: 14 },
-  label: { color: '#aaa', fontSize: 13, marginBottom: 8, marginTop: 16 },
+  overlay: { flex: 1, backgroundColor: colors.overlay, justifyContent: 'flex-end' },
+  sheet: { backgroundColor: colors.surfaceElevated, borderTopLeftRadius: radii.xl, borderTopRightRadius: radii.xl, padding: 24, paddingBottom: 40, maxHeight: '85%', borderWidth: 1, borderColor: colors.border },
+  handle: { width: 40, height: 4, backgroundColor: colors.faint, borderRadius: 2, alignSelf: 'center', marginBottom: 20 },
+  title: { fontSize: 20, fontWeight: '900', color: colors.text, marginBottom: 6 },
+  caption: { color: colors.muted, fontSize: 12, marginBottom: 14 },
+  label: { color: colors.textSoft, fontSize: 13, marginBottom: 8, marginTop: 16, fontWeight: '700' },
   chipRow: { flexDirection: 'row', gap: 8, paddingBottom: 4 },
-  chip: { paddingHorizontal: 14, paddingVertical: 8, borderRadius: 16, borderWidth: 1, borderColor: '#333' },
-  chipActive: { backgroundColor: '#e50914', borderColor: '#e50914' },
-  chipText: { color: '#666', fontSize: 13 },
-  chipTextActive: { color: '#fff', fontWeight: '600' },
+  genreGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, paddingBottom: 4 },
+  chip: { paddingHorizontal: 14, paddingVertical: 8, borderRadius: radii.pill, borderWidth: 1, borderColor: colors.borderSoft, backgroundColor: colors.surface },
+  chipActive: { backgroundColor: colors.primary, borderColor: colors.primary },
+  chipText: { color: colors.muted, fontSize: 13, fontWeight: '600' },
+  chipTextActive: { color: colors.text, fontWeight: '800' },
   yearRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
-  yearInput: { backgroundColor: '#0f0f1a', borderRadius: 10, paddingHorizontal: 14, paddingVertical: 10, color: '#fff', fontSize: 14, width: 100 },
-  yearDash: { color: '#aaa' },
+  yearInput: { backgroundColor: colors.bgSoft, borderRadius: radii.md, paddingHorizontal: 14, paddingVertical: 10, color: colors.text, fontSize: 14, width: 100, borderWidth: 1, borderColor: colors.borderSoft },
+  yearDash: { color: colors.textSoft },
   buttons: { flexDirection: 'row', gap: 12, marginTop: 24 },
-  resetBtn: { flex: 1, borderWidth: 1, borderColor: '#333', paddingVertical: 14, borderRadius: 30, alignItems: 'center' },
-  resetText: { color: '#aaa', fontWeight: '600' },
-  applyBtn: { flex: 2, backgroundColor: '#e50914', paddingVertical: 14, borderRadius: 30, alignItems: 'center' },
-  applyText: { color: '#fff', fontWeight: '700', fontSize: 15 },
+  resetBtn: { flex: 1, borderWidth: 1, borderColor: colors.border, paddingVertical: 14, borderRadius: radii.pill, alignItems: 'center' },
+  resetText: { color: colors.textSoft, fontWeight: '700' },
+  applyBtn: { flex: 2, backgroundColor: colors.primary, paddingVertical: 14, borderRadius: radii.pill, alignItems: 'center' },
+  applyText: { color: colors.text, fontWeight: '800', fontSize: 15 },
 });

@@ -10,9 +10,13 @@ import {
   View,
 } from 'react-native';
 import { useAppContext } from '../store/AppContext';
+import { colors, gradients, radii } from '../constants/theme';
 
 export default function SettingsScreen() {
-  const { adultContent, toggleAdultContent, watchlist, recentRandomIds, clearRecentRandom } = useAppContext();
+  const {
+    adultContent, toggleAdultContent, watchlist, recentRandomIds,
+    clearRecentRandom, clearWatchlist, resetOnboarding,
+  } = useAppContext();
 
   const confirmClearHistory = () => {
     if (recentRandomIds.length === 0) return;
@@ -26,8 +30,20 @@ export default function SettingsScreen() {
     );
   };
 
+  const confirmClearWatchlist = () => {
+    if (watchlist.length === 0) return;
+    Alert.alert(
+      'Очистить избранное?',
+      'Все сохранённые тайтлы и оценки будут удалены без возможности восстановить.',
+      [
+        { text: 'Отмена', style: 'cancel' },
+        { text: 'Очистить', style: 'destructive', onPress: clearWatchlist },
+      ]
+    );
+  };
+
   return (
-    <LinearGradient colors={['#0f0f1a', '#1a1a2e']} style={styles.container}>
+    <LinearGradient colors={gradients.app} style={styles.container}>
       <ScrollView contentContainerStyle={styles.scroll}>
         <Text style={styles.header}>Настройки</Text>
 
@@ -41,8 +57,8 @@ export default function SettingsScreen() {
             <Switch
               value={adultContent}
               onValueChange={toggleAdultContent}
-              trackColor={{ false: '#333', true: '#e50914' }}
-              thumbColor={adultContent ? '#fff' : '#aaa'}
+              trackColor={{ false: colors.borderSoft, true: colors.primary }}
+              thumbColor={adultContent ? colors.text : colors.textSoft}
             />
           </View>
         </View>
@@ -76,7 +92,38 @@ export default function SettingsScreen() {
                   : 'История пуста'}
               </Text>
             </View>
-            <Ionicons name="trash-outline" size={20} color={recentRandomIds.length === 0 ? '#444' : '#e50914'} />
+            <Ionicons name="trash-outline" size={20} color={recentRandomIds.length === 0 ? colors.faint : colors.primary} />
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={[styles.row, { marginTop: 12 }, watchlist.length === 0 && styles.rowDisabled]}
+            onPress={confirmClearWatchlist}
+            disabled={watchlist.length === 0}
+            accessibilityRole="button"
+            accessibilityLabel="Очистить избранное"
+          >
+            <View style={styles.rowInfo}>
+              <Text style={styles.rowTitle}>Очистить избранное</Text>
+              <Text style={styles.rowSubtitle}>
+                {watchlist.length > 0
+                  ? `Удалить ${watchlist.length} и все оценки`
+                  : 'Избранное пусто'}
+              </Text>
+            </View>
+            <Ionicons name="heart-dislike-outline" size={20} color={watchlist.length === 0 ? colors.faint : colors.primary} />
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={[styles.row, { marginTop: 12 }]}
+            onPress={resetOnboarding}
+            accessibilityRole="button"
+            accessibilityLabel="Показать вступление снова"
+          >
+            <View style={styles.rowInfo}>
+              <Text style={styles.rowTitle}>Показать вступление снова</Text>
+              <Text style={styles.rowSubtitle}>Откроется при следующем запуске</Text>
+            </View>
+            <Ionicons name="refresh-outline" size={20} color={colors.accent} />
           </TouchableOpacity>
         </View>
 
@@ -84,15 +131,15 @@ export default function SettingsScreen() {
           <Text style={styles.sectionTitle}>О приложении</Text>
           <View style={styles.infoBlock}>
             <View style={styles.infoRow}>
-              <Ionicons name="phone-portrait-outline" size={16} color="#888" />
+              <Ionicons name="phone-portrait-outline" size={16} color={colors.muted} />
               <Text style={styles.infoText}>MediaRoulette v1.0</Text>
             </View>
             <View style={styles.infoRow}>
-              <Ionicons name="film-outline" size={16} color="#888" />
+              <Ionicons name="film-outline" size={16} color={colors.muted} />
               <Text style={styles.infoText}>Данные: The Movie Database</Text>
             </View>
             <View style={styles.infoRow}>
-              <Ionicons name="sparkles-outline" size={16} color="#888" />
+              <Ionicons name="sparkles-outline" size={16} color={colors.muted} />
               <Text style={styles.infoText}>ИИ-подборщик: Gemini</Text>
             </View>
           </View>
@@ -105,19 +152,19 @@ export default function SettingsScreen() {
 const styles = StyleSheet.create({
   container: { flex: 1 },
   scroll: { padding: 20, paddingTop: 60, paddingBottom: 40 },
-  header: { fontSize: 28, fontWeight: 'bold', color: '#fff', marginBottom: 28 },
+  header: { fontSize: 28, fontWeight: '900', color: colors.text, marginBottom: 28 },
   section: { marginBottom: 32 },
-  sectionTitle: { fontSize: 13, color: '#888', fontWeight: '600', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 8 },
-  row: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#1e1e30', borderRadius: 16, padding: 16, gap: 12 },
+  sectionTitle: { fontSize: 13, color: colors.muted, fontWeight: '800', textTransform: 'uppercase', letterSpacing: 0, marginBottom: 8 },
+  row: { flexDirection: 'row', alignItems: 'center', backgroundColor: colors.surfaceElevated, borderRadius: radii.lg, padding: 16, gap: 12, borderWidth: 1, borderColor: colors.borderSoft },
   rowDisabled: { opacity: 0.5 },
   rowInfo: { flex: 1 },
-  rowTitle: { color: '#fff', fontSize: 16, fontWeight: '600', marginBottom: 4 },
-  rowSubtitle: { color: '#888', fontSize: 13 },
+  rowTitle: { color: colors.text, fontSize: 16, fontWeight: '800', marginBottom: 4 },
+  rowSubtitle: { color: colors.muted, fontSize: 13 },
   statsRow: { flexDirection: 'row', gap: 12 },
-  statCard: { flex: 1, backgroundColor: '#1e1e30', borderRadius: 16, padding: 16 },
-  statValue: { color: '#fff', fontSize: 24, fontWeight: '800' },
-  statLabel: { color: '#888', fontSize: 12, marginTop: 2 },
-  infoBlock: { backgroundColor: '#1e1e30', borderRadius: 16, padding: 16, gap: 12 },
+  statCard: { flex: 1, backgroundColor: colors.surfaceElevated, borderRadius: radii.lg, padding: 16, borderWidth: 1, borderColor: colors.borderSoft },
+  statValue: { color: colors.text, fontSize: 24, fontWeight: '900' },
+  statLabel: { color: colors.muted, fontSize: 12, marginTop: 2 },
+  infoBlock: { backgroundColor: colors.surfaceElevated, borderRadius: radii.lg, padding: 16, gap: 12, borderWidth: 1, borderColor: colors.borderSoft },
   infoRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
-  infoText: { color: '#aaa', fontSize: 14 },
+  infoText: { color: colors.textSoft, fontSize: 14 },
 });

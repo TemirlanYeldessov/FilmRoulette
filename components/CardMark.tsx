@@ -2,6 +2,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { memo } from 'react';
 import { StyleSheet, TouchableOpacity, View } from 'react-native';
 import { useAppContext } from '../store/AppContext';
+import { colors } from '../constants/theme';
 
 // Corner controls on grid cards: a passive green check for anything already
 // graded (seen), plus a tappable heart to save/unsave a title without opening
@@ -25,11 +26,11 @@ function CardMark({ movie }: { movie: any }) {
     <View style={styles.row}>
       {seen && (
         <View style={[styles.mark, styles.check]}>
-          <Ionicons name="checkmark" size={11} color="#fff" />
+          <Ionicons name="checkmark" size={11} color={colors.text} />
         </View>
       )}
       <TouchableOpacity style={[styles.mark, fav ? styles.favOn : styles.favOff]} onPress={toggleFav} hitSlop={8}>
-        <Ionicons name={fav ? 'heart' : 'heart-outline'} size={12} color="#fff" />
+        <Ionicons name={fav ? 'heart' : 'heart-outline'} size={12} color={colors.text} />
       </TouchableOpacity>
     </View>
   );
@@ -51,9 +52,9 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     borderWidth: 1,
-    borderColor: 'rgba(0,0,0,0.35)',
+    borderColor: colors.whiteGlass,
   },
-  check: { backgroundColor: '#1f8a4c' },
-  favOn: { backgroundColor: '#e50914' },
-  favOff: { backgroundColor: 'rgba(0,0,0,0.5)' },
+  check: { backgroundColor: colors.success },
+  favOn: { backgroundColor: colors.primary },
+  favOff: { backgroundColor: colors.blackGlass },
 });

@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react';
 import { Animated, StyleSheet, View, ViewStyle } from 'react-native';
+import { colors, radii } from '../constants/theme';
 
 interface SkeletonProps {
   width: number | `${number}%`;
@@ -18,11 +19,11 @@ export function Skeleton({ width, height, borderRadius = 8, style }: SkeletonPro
         Animated.timing(opacity, { toValue: 0.3, duration: 800, useNativeDriver: true }),
       ])
     ).start();
-  }, []);
+  }, [opacity]);
 
   return (
     <Animated.View
-      style={[{ width: width as any, height, borderRadius, backgroundColor: '#2a2a3a', opacity }, style]}
+      style={[{ width: width as any, height, borderRadius, backgroundColor: colors.surfacePressed, opacity }, style]}
     />
   );
 }
@@ -30,7 +31,7 @@ export function Skeleton({ width, height, borderRadius = 8, style }: SkeletonPro
 export function MovieCardSkeleton({ cardWidth }: { cardWidth: number }) {
   return (
     <View style={{ width: cardWidth }}>
-      <Skeleton width={cardWidth} height={cardWidth * 1.5} borderRadius={10} style={{ marginBottom: 8 }} />
+      <Skeleton width={cardWidth} height={cardWidth * 1.5} borderRadius={radii.md} style={{ marginBottom: 8 }} />
       <Skeleton width={cardWidth * 0.8} height={14} borderRadius={6} style={{ marginBottom: 4 }} />
       <Skeleton width={cardWidth * 0.4} height={12} borderRadius={6} />
     </View>
@@ -40,7 +41,7 @@ export function MovieCardSkeleton({ cardWidth }: { cardWidth: number }) {
 export function HorizontalCardSkeleton() {
   return (
     <View style={{ width: 120, marginRight: 12 }}>
-      <Skeleton width={120} height={180} borderRadius={10} style={{ marginBottom: 6 }} />
+      <Skeleton width={120} height={180} borderRadius={radii.md} style={{ marginBottom: 6 }} />
       <Skeleton width={90} height={12} borderRadius={6} />
     </View>
   );
@@ -49,7 +50,7 @@ export function HorizontalCardSkeleton() {
 export function MovieDetailSkeleton() {
   return (
     <View style={styles.detailContainer}>
-      <Skeleton width={220} height={330} borderRadius={16} style={{ marginBottom: 24, alignSelf: 'center' }} />
+      <Skeleton width={220} height={330} borderRadius={radii.lg} style={{ marginBottom: 24, alignSelf: 'center' }} />
       <Skeleton width={280} height={22} borderRadius={6} style={{ marginBottom: 8, alignSelf: 'center' }} />
       <Skeleton width={200} height={16} borderRadius={6} style={{ marginBottom: 16, alignSelf: 'center' }} />
       <View style={styles.badgeRow}>

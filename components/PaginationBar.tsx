@@ -1,6 +1,7 @@
 import { Ionicons } from '@expo/vector-icons';
 import { useState } from 'react';
 import { Modal, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { colors, radii } from '../constants/theme';
 
 interface Props {
   currentPage: number;
@@ -69,7 +70,7 @@ export default function PaginationBar({
           disabled={loading || currentPage === 1}
           onPress={() => onPageChange(currentPage - 1)}
         >
-          <Ionicons name="chevron-back" size={18} color={currentPage === 1 ? '#444' : '#ccc'} />
+          <Ionicons name="chevron-back" size={18} color={currentPage === 1 ? colors.faint : colors.textSoft} />
         </TouchableOpacity>
 
         {pages.map((p, i) =>
@@ -98,7 +99,7 @@ export default function PaginationBar({
           disabled={loading || currentPage === totalPages}
           onPress={() => onPageChange(currentPage + 1)}
         >
-          <Ionicons name="chevron-forward" size={18} color={currentPage === totalPages ? '#444' : '#ccc'} />
+          <Ionicons name="chevron-forward" size={18} color={currentPage === totalPages ? colors.faint : colors.textSoft} />
         </TouchableOpacity>
       </View>
 
@@ -110,7 +111,7 @@ export default function PaginationBar({
               style={s.dialogInput}
               keyboardType="number-pad"
               placeholder={`1 – ${totalPages}`}
-              placeholderTextColor="#777"
+              placeholderTextColor={colors.muted2}
               value={input}
               onChangeText={v => { setInput(v); if (inputError) setInputError(''); }}
               autoFocus
@@ -129,33 +130,39 @@ export default function PaginationBar({
 
 const s = StyleSheet.create({
   wrap: { alignItems: 'center', paddingVertical: 20, paddingBottom: 28 },
-  info: { color: '#666', fontSize: 12, marginBottom: 12 },
+  info: { color: colors.muted2, fontSize: 12, marginBottom: 12 },
   bar: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   btn: {
-    width: 36, height: 36, borderRadius: 10,
+    width: 36, height: 36, borderRadius: radii.sm,
     alignItems: 'center', justifyContent: 'center',
-    backgroundColor: '#1e1e30',
+    backgroundColor: colors.surfaceElevated,
+    borderWidth: 1,
+    borderColor: colors.borderSoft,
   },
-  btnActive: { backgroundColor: '#e50914' },
+  btnActive: { backgroundColor: colors.primary, borderColor: colors.primary },
   btnDisabled: { opacity: 0.35 },
-  num: { color: '#aaa', fontSize: 13, fontWeight: '600' },
-  numActive: { color: '#fff' },
-  dots: { color: '#555', fontSize: 16, paddingHorizontal: 4, lineHeight: 36 },
+  num: { color: colors.textSoft, fontSize: 13, fontWeight: '700' },
+  numActive: { color: colors.text },
+  dots: { color: colors.muted2, fontSize: 16, paddingHorizontal: 4, lineHeight: 36 },
   overlay: {
-    flex: 1, backgroundColor: 'rgba(0,0,0,0.75)',
+    flex: 1, backgroundColor: colors.overlay,
     alignItems: 'center', justifyContent: 'center',
   },
   dialog: {
-    backgroundColor: '#1a1a2e', borderRadius: 20, padding: 24,
+    backgroundColor: colors.surfaceElevated, borderRadius: radii.xl, padding: 24,
     width: 260, alignItems: 'center', gap: 14,
+    borderWidth: 1,
+    borderColor: colors.border,
   },
-  dialogTitle: { color: '#fff', fontSize: 16, fontWeight: '700' },
+  dialogTitle: { color: colors.text, fontSize: 16, fontWeight: '800' },
   dialogInput: {
-    backgroundColor: '#0f0f1a', borderRadius: 12,
+    backgroundColor: colors.bgSoft, borderRadius: radii.md,
     paddingHorizontal: 16, paddingVertical: 12,
-    color: '#fff', fontSize: 16, width: '100%', textAlign: 'center',
+    color: colors.text, fontSize: 16, width: '100%', textAlign: 'center',
+    borderWidth: 1,
+    borderColor: colors.borderSoft,
   },
-  dialogBtn: { backgroundColor: '#e50914', borderRadius: 12, paddingHorizontal: 32, paddingVertical: 12 },
-  dialogBtnText: { color: '#fff', fontWeight: '700', fontSize: 15 },
-  dialogError: { color: '#e50914', fontSize: 12, textAlign: 'center', marginTop: -8 },
+  dialogBtn: { backgroundColor: colors.primary, borderRadius: radii.md, paddingHorizontal: 32, paddingVertical: 12 },
+  dialogBtnText: { color: colors.text, fontWeight: '800', fontSize: 15 },
+  dialogError: { color: colors.primary, fontSize: 12, textAlign: 'center', marginTop: -8 },
 });

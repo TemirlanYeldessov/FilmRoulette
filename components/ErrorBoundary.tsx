@@ -1,6 +1,7 @@
 import { Ionicons } from '@expo/vector-icons';
 import { Component, ReactNode } from 'react';
 import { StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { colors, radii } from '../constants/theme';
 
 interface Props {
   children: ReactNode;
@@ -35,7 +36,7 @@ export default class ErrorBoundary extends Component<Props, State> {
 
     return (
       <View style={styles.container}>
-        <Ionicons name="bug-outline" size={48} color="#e50914" />
+        <Ionicons name="bug-outline" size={48} color={colors.primary} />
         <Text style={styles.title}>Что-то пошло не так</Text>
         <Text style={styles.text}>
           Произошёл сбой при отображении экрана. Можно попробовать продолжить.
@@ -50,10 +51,10 @@ export default class ErrorBoundary extends Component<Props, State> {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#0f0f1a', alignItems: 'center', justifyContent: 'center', padding: 32, gap: 12 },
-  title: { color: '#fff', fontSize: 20, fontWeight: '700', marginTop: 8 },
-  text: { color: '#aaa', fontSize: 14, textAlign: 'center', lineHeight: 20 },
-  detail: { color: '#555', fontSize: 12, textAlign: 'center', marginTop: 4 },
-  btn: { backgroundColor: '#e50914', paddingHorizontal: 32, paddingVertical: 14, borderRadius: 30, marginTop: 12 },
-  btnText: { color: '#fff', fontWeight: '700', fontSize: 16 },
+  container: { flex: 1, backgroundColor: colors.bg, alignItems: 'center', justifyContent: 'center', padding: 32, gap: 12 },
+  title: { color: colors.text, fontSize: 20, fontWeight: '800', marginTop: 8 },
+  text: { color: colors.textSoft, fontSize: 14, textAlign: 'center', lineHeight: 20 },
+  detail: { color: colors.muted2, fontSize: 12, textAlign: 'center', marginTop: 4 },
+  btn: { backgroundColor: colors.primary, paddingHorizontal: 32, paddingVertical: 14, borderRadius: radii.pill, marginTop: 12 },
+  btnText: { color: colors.text, fontWeight: '800', fontSize: 16 },
 });

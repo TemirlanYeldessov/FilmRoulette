@@ -1,5 +1,5 @@
 import { LinearGradient } from 'expo-linear-gradient';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Alert,
   FlatList,
@@ -10,7 +10,6 @@ import {
   Text,
   TextInput,
   TouchableOpacity,
-  useWindowDimensions,
   View,
 } from 'react-native';
 import { Image } from 'expo-image';
@@ -23,7 +22,9 @@ import { getCached, setCached, LIST_TTL } from '../utils/apiCache';
 import { dedup, itemToMovie, sanitizeYearRange, areFiltersEqual, applyDiscoverFilters } from '../utils/tmdb';
 import { makeTmdbFetch } from '../utils/api';
 import { tmdbUrls, tmdbHeaders } from '../utils/tmdbApi';
+import { useGridColumns } from '../utils/useGridColumns';
 import { COUNTRIES, LANGUAGES, RATINGS, SORT_OPTIONS } from '../constants/filters';
+import { colors, gradients, radii } from '../constants/theme';
 
 const MEDIA_TABS = [
   { key: 'movie', label: 'Фильмы' },
@@ -107,8 +108,7 @@ function isDefaultFilters(f: typeof defaultFilters) {
 
 export default function TopScreen({ navigation }: any) {
   const { adultContent } = useAppContext();
-  const { width } = useWindowDimensions();
-  const cardWidth = useMemo(() => (width - 48) / 2, [width]);
+  const { columns, cardWidth } = useGridColumns();
   const [mediaType, setMediaType] = useState('movie');
   const [category, setCategory] = useState('top_rated');
   const [items, setItems] = useState<any[]>([]);
@@ -158,7 +158,7 @@ export default function TopScreen({ navigation }: any) {
     setSearchQuery('');
     lastQueryRef.current = '';
     load(mediaType, category, 1);
-  }, [mediaType, category]);
+  }, [mediaType, category, load]);
 
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
@@ -239,7 +239,7 @@ export default function TopScreen({ navigation }: any) {
       }
     }, 400);
     return () => clearTimeout(timer);
-  }, [searchQuery, mediaType, adultContent, category, load]);
+  }, [searchQuery, mediaType, adultContent, category, load, isSearchMode]);
 
   const applyFilters = async (rawF: any) => {
     const f = { ...rawF };
@@ -291,6 +291,25 @@ export default function TopScreen({ navigation }: any) {
     ]);
   };
 
+  const resetSearchAndFilters = () => {
+    requestIdRef.current += 1;
+    setSearchQuery('');
+    setFilters(defaultFilters);
+    setLocalFilters(defaultFilters);
+    activeFiltersRef.current = defaultFilters;
+    lastQueryRef.current = '';
+    setIsSearchMode(false);
+    setSearching(false);
+    setError('');
+    setCurrentPage(1);
+    load(mediaType, category, 1);
+  };
+
+  const retryCurrent = () => {
+    if (isSearchMode) handlePageChange(currentPage);
+    else load(mediaType, category, currentPage);
+  };
+
   const openCard = (item: any) => {
     navigation.navigate('Card', { movie: itemToMovie(item, mediaType) });
   };
@@ -299,7 +318,7 @@ export default function TopScreen({ navigation }: any) {
   const isLoading = loading || searching;
 
   return (
-    <LinearGradient colors={['#0f0f1a', '#1a1a2e']} style={styles.container}>
+    <LinearGradient colors={gradients.app} style={styles.container}>
       <View style={styles.header}>
         <Text style={styles.headerTitle}>Топ</Text>
         <View style={styles.mediaTabs}>
@@ -316,23 +335,23 @@ export default function TopScreen({ navigation }: any) {
 
         <View style={styles.searchRow}>
           <View style={styles.searchInputWrap}>
-            <Ionicons name="search" size={16} color="#555" style={styles.searchIcon} />
+            <Ionicons name="search" size={16} color={colors.muted2} style={styles.searchIcon} />
             <TextInput
               style={styles.searchInput}
               placeholder="Поиск в топе..."
-              placeholderTextColor="#777"
+              placeholderTextColor={colors.muted2}
               value={searchQuery}
               onChangeText={setSearchQuery}
               returnKeyType="search"
             />
             {searchQuery.length > 0 && (
-              <TouchableOpacity onPress={() => setSearchQuery('')}>
-                <Ionicons name="close-circle" size={16} color="#555" />
+              <TouchableOpacity onPress={() => setSearchQuery('')} accessibilityRole="button" accessibilityLabel="Очистить поиск">
+                <Ionicons name="close-circle" size={16} color={colors.muted2} />
               </TouchableOpacity>
             )}
           </View>
-          <TouchableOpacity style={styles.filterBtn} onPress={() => { setLocalFilters(filters); setShowFilters(true); }}>
-            <Ionicons name="options" size={20} color="#fff" />
+          <TouchableOpacity style={styles.filterBtn} onPress={() => { setLocalFilters(filters); setShowFilters(true); }} accessibilityRole="button" accessibilityLabel="Открыть фильтры">
+            <Ionicons name="options" size={20} color={colors.text} />
           </TouchableOpacity>
         </View>
 
@@ -355,34 +374,51 @@ export default function TopScreen({ navigation }: any) {
         <FlatList
           data={SKELETON_KEYS}
           keyExtractor={i => String(i)}
-          numColumns={2}
+          key={`grid-${columns}`}
+          numColumns={columns}
           contentContainerStyle={styles.grid}
           columnWrapperStyle={styles.row}
           renderItem={() => <MovieCardSkeleton cardWidth={cardWidth} />}
         />
       ) : error ? (
         <View style={styles.empty}>
-          <Ionicons name="cloud-offline-outline" size={38} color="#555" />
+          <Ionicons name="cloud-offline-outline" size={38} color={colors.faint} />
           <Text style={styles.emptyText}>{error}</Text>
-          <TouchableOpacity style={styles.retryBtn} onPress={() => load(mediaType, category, currentPage)}>
+          <TouchableOpacity style={styles.retryBtn} onPress={retryCurrent}>
             <Text style={styles.retryText}>Повторить</Text>
           </TouchableOpacity>
         </View>
       ) : items.length === 0 ? (
         <View style={styles.empty}>
+          <Ionicons name={isSearchMode ? 'filter-outline' : 'albums-outline'} size={38} color={colors.faint} />
           <Text style={styles.emptyText}>Ничего не найдено</Text>
+          <Text style={styles.emptyHint}>
+            {isSearchMode
+              ? 'По текущему поиску или фильтрам нет тайтлов. Сбрось условия и начни заново.'
+              : 'Попробуй обновить список чуть позже.'}
+          </Text>
+          {isSearchMode ? (
+            <TouchableOpacity style={styles.retryBtn} onPress={resetSearchAndFilters}>
+              <Text style={styles.retryText}>Сбросить поиск</Text>
+            </TouchableOpacity>
+          ) : (
+            <TouchableOpacity style={styles.retryBtn} onPress={() => load(mediaType, category, 1)}>
+              <Text style={styles.retryText}>Обновить</Text>
+            </TouchableOpacity>
+          )}
         </View>
       ) : (
         <FlatList
           ref={listRef}
           data={items}
           keyExtractor={(item) => `${item.media_type || mediaType}-${item.id}`}
-          numColumns={2}
+          key={`grid-${columns}`}
+          numColumns={columns}
           contentContainerStyle={styles.grid}
           columnWrapperStyle={styles.row}
           refreshControl={
             !isSearchMode
-              ? <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#e50914" />
+              ? <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.primary} />
               : undefined
           }
           renderItem={({ item, index }) => {
@@ -438,9 +474,9 @@ export default function TopScreen({ navigation }: any) {
 
               <Text style={fStyles.label}>Год выпуска</Text>
               <View style={fStyles.yearRow}>
-                <TextInput style={fStyles.yearInput} placeholder="От" placeholderTextColor="#777" value={localFilters.yearFrom} onChangeText={v => setLocalFilters(f => ({ ...f, yearFrom: v }))} keyboardType="numeric" maxLength={4} />
+                <TextInput style={fStyles.yearInput} placeholder="От" placeholderTextColor={colors.muted2} value={localFilters.yearFrom} onChangeText={v => setLocalFilters(f => ({ ...f, yearFrom: v }))} keyboardType="numeric" maxLength={4} />
                 <Text style={fStyles.yearDash}>-</Text>
-                <TextInput style={fStyles.yearInput} placeholder="До" placeholderTextColor="#777" value={localFilters.yearTo} onChangeText={v => setLocalFilters(f => ({ ...f, yearTo: v }))} keyboardType="numeric" maxLength={4} />
+                <TextInput style={fStyles.yearInput} placeholder="До" placeholderTextColor={colors.muted2} value={localFilters.yearTo} onChangeText={v => setLocalFilters(f => ({ ...f, yearTo: v }))} keyboardType="numeric" maxLength={4} />
               </View>
 
               <Text style={fStyles.label}>Язык оригинала</Text>
@@ -494,54 +530,55 @@ export default function TopScreen({ navigation }: any) {
 
 const styles = StyleSheet.create({
   container: { flex: 1 },
-  header: { paddingTop: 60, paddingHorizontal: 16, paddingBottom: 12, backgroundColor: '#0f0f1a' },
-  headerTitle: { fontSize: 28, fontWeight: 'bold', color: '#fff', marginBottom: 14 },
+  header: { paddingTop: 60, paddingHorizontal: 16, paddingBottom: 12, backgroundColor: colors.bg },
+  headerTitle: { fontSize: 28, fontWeight: '900', color: colors.text, marginBottom: 14 },
   mediaTabs: { flexDirection: 'row', gap: 10, marginBottom: 12 },
-  mediaTab: { paddingHorizontal: 20, paddingVertical: 8, borderRadius: 20, borderWidth: 1, borderColor: '#444' },
-  mediaTabActive: { backgroundColor: '#e50914', borderColor: '#e50914' },
-  mediaTabText: { color: '#aaa', fontWeight: '600' },
-  mediaTabTextActive: { color: '#fff' },
+  mediaTab: { paddingHorizontal: 20, paddingVertical: 8, borderRadius: radii.pill, borderWidth: 1, borderColor: colors.borderSoft, backgroundColor: colors.surface },
+  mediaTabActive: { backgroundColor: colors.primary, borderColor: colors.primary },
+  mediaTabText: { color: colors.textSoft, fontWeight: '700' },
+  mediaTabTextActive: { color: colors.text },
   searchRow: { flexDirection: 'row', gap: 10, alignItems: 'center', marginBottom: 12 },
-  searchInputWrap: { flex: 1, flexDirection: 'row', alignItems: 'center', backgroundColor: '#1e1e30', borderRadius: 12, paddingHorizontal: 12, height: 44 },
+  searchInputWrap: { flex: 1, flexDirection: 'row', alignItems: 'center', backgroundColor: colors.surfaceElevated, borderRadius: radii.md, paddingHorizontal: 12, height: 44, borderWidth: 1, borderColor: colors.borderSoft },
   searchIcon: { marginRight: 8 },
-  searchInput: { flex: 1, color: '#fff', fontSize: 14 },
-  filterBtn: { backgroundColor: '#1e1e30', width: 44, height: 44, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
+  searchInput: { flex: 1, color: colors.text, fontSize: 14 },
+  filterBtn: { backgroundColor: colors.surfaceElevated, width: 44, height: 44, borderRadius: radii.md, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: colors.borderSoft },
   categoryScroll: { marginBottom: 4 },
-  catChip: { paddingHorizontal: 14, paddingVertical: 7, borderRadius: 16, borderWidth: 1, borderColor: '#333', marginRight: 8 },
-  catChipActive: { backgroundColor: '#1e1e40', borderColor: '#8888ff' },
-  catChipText: { color: '#666', fontSize: 13 },
-  catChipTextActive: { color: '#8888ff', fontWeight: '600' },
+  catChip: { paddingHorizontal: 14, paddingVertical: 7, borderRadius: radii.pill, borderWidth: 1, borderColor: colors.borderSoft, marginRight: 8, backgroundColor: colors.surface },
+  catChipActive: { backgroundColor: colors.accentSoft, borderColor: colors.accent },
+  catChipText: { color: colors.muted, fontSize: 13, fontWeight: '600' },
+  catChipTextActive: { color: colors.textSoft, fontWeight: '800' },
   grid: { padding: 12 },
   row: { justifyContent: 'space-between', marginBottom: 12 },
   card: {},
-  rankBadge: { position: 'absolute', top: 8, left: 8, backgroundColor: '#e50914', borderRadius: 10, paddingHorizontal: 8, paddingVertical: 3, zIndex: 1 },
-  rankText: { color: '#fff', fontWeight: 'bold', fontSize: 12 },
-  poster: { borderRadius: 10, marginBottom: 6 },
-  cardTitle: { color: '#fff', fontSize: 12, fontWeight: '600', marginBottom: 3 },
-  cardRating: { color: '#aaa', fontSize: 11 },
+  rankBadge: { position: 'absolute', top: 8, left: 8, backgroundColor: colors.primary, borderRadius: radii.pill, paddingHorizontal: 8, paddingVertical: 3, zIndex: 1 },
+  rankText: { color: colors.text, fontWeight: '800', fontSize: 12 },
+  poster: { borderRadius: radii.md, marginBottom: 8, backgroundColor: colors.surface },
+  cardTitle: { color: colors.text, fontSize: 12, fontWeight: '700', marginBottom: 3 },
+  cardRating: { color: colors.muted, fontSize: 11 },
   empty: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 10, paddingHorizontal: 24 },
-  emptyText: { color: '#aaa', fontSize: 16, textAlign: 'center' },
-  retryBtn: { backgroundColor: '#e50914', paddingHorizontal: 24, paddingVertical: 10, borderRadius: 20, marginTop: 8 },
-  retryText: { color: '#fff', fontWeight: '700', fontSize: 14 },
+  emptyText: { color: colors.textSoft, fontSize: 16, textAlign: 'center', fontWeight: '700' },
+  emptyHint: { color: colors.muted2, fontSize: 13, textAlign: 'center', lineHeight: 19 },
+  retryBtn: { backgroundColor: colors.primary, paddingHorizontal: 24, paddingVertical: 10, borderRadius: radii.pill, marginTop: 8 },
+  retryText: { color: colors.text, fontWeight: '800', fontSize: 14 },
 });
 
 const fStyles = StyleSheet.create({
-  overlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'flex-end' },
-  sheet: { backgroundColor: '#1a1a2e', borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 24, paddingBottom: 40, maxHeight: '80%' },
-  handle: { width: 40, height: 4, backgroundColor: '#444', borderRadius: 2, alignSelf: 'center', marginBottom: 20 },
-  title: { fontSize: 20, fontWeight: 'bold', color: '#fff', marginBottom: 20 },
-  label: { color: '#aaa', fontSize: 13, marginBottom: 8, marginTop: 16 },
+  overlay: { flex: 1, backgroundColor: colors.overlay, justifyContent: 'flex-end' },
+  sheet: { backgroundColor: colors.surfaceElevated, borderTopLeftRadius: radii.xl, borderTopRightRadius: radii.xl, padding: 24, paddingBottom: 40, maxHeight: '80%', borderWidth: 1, borderColor: colors.border },
+  handle: { width: 40, height: 4, backgroundColor: colors.faint, borderRadius: 2, alignSelf: 'center', marginBottom: 20 },
+  title: { fontSize: 20, fontWeight: '900', color: colors.text, marginBottom: 20 },
+  label: { color: colors.textSoft, fontSize: 13, marginBottom: 8, marginTop: 16, fontWeight: '700' },
   chipRow: { flexDirection: 'row', gap: 8, paddingBottom: 4 },
-  chip: { paddingHorizontal: 14, paddingVertical: 8, borderRadius: 16, borderWidth: 1, borderColor: '#333' },
-  chipActive: { backgroundColor: '#e50914', borderColor: '#e50914' },
-  chipText: { color: '#666', fontSize: 13 },
-  chipTextActive: { color: '#fff', fontWeight: '600' },
+  chip: { paddingHorizontal: 14, paddingVertical: 8, borderRadius: radii.pill, borderWidth: 1, borderColor: colors.borderSoft, backgroundColor: colors.surface },
+  chipActive: { backgroundColor: colors.primary, borderColor: colors.primary },
+  chipText: { color: colors.muted, fontSize: 13, fontWeight: '600' },
+  chipTextActive: { color: colors.text, fontWeight: '800' },
   yearRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
-  yearInput: { backgroundColor: '#0f0f1a', borderRadius: 10, paddingHorizontal: 14, paddingVertical: 10, color: '#fff', fontSize: 14, width: 100 },
-  yearDash: { color: '#aaa' },
+  yearInput: { backgroundColor: colors.bgSoft, borderRadius: radii.md, paddingHorizontal: 14, paddingVertical: 10, color: colors.text, fontSize: 14, width: 100, borderWidth: 1, borderColor: colors.borderSoft },
+  yearDash: { color: colors.textSoft },
   buttons: { flexDirection: 'row', gap: 12, marginTop: 24 },
-  resetBtn: { flex: 1, borderWidth: 1, borderColor: '#333', paddingVertical: 14, borderRadius: 30, alignItems: 'center' },
-  resetText: { color: '#aaa', fontWeight: '600' },
-  applyBtn: { flex: 2, backgroundColor: '#e50914', paddingVertical: 14, borderRadius: 30, alignItems: 'center' },
-  applyText: { color: '#fff', fontWeight: '700', fontSize: 15 },
+  resetBtn: { flex: 1, borderWidth: 1, borderColor: colors.border, paddingVertical: 14, borderRadius: radii.pill, alignItems: 'center' },
+  resetText: { color: colors.textSoft, fontWeight: '700' },
+  applyBtn: { flex: 2, backgroundColor: colors.primary, paddingVertical: 14, borderRadius: radii.pill, alignItems: 'center' },
+  applyText: { color: colors.text, fontWeight: '800', fontSize: 15 },
 });

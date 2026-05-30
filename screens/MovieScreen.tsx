@@ -23,6 +23,8 @@ import { dedup, itemToMovie, mapBaseDetail } from '../utils/tmdb';
 import { makeTmdbFetch } from '../utils/api';
 import { getCached, setCached } from '../utils/apiCache';
 import { tmdbUrls, tmdbHeaders, pickRandomDiscoverItem } from '../utils/tmdbApi';
+import { tapLight, tapMedium } from '../utils/haptics';
+import { colors, gradients, radii, shadow } from '../constants/theme';
 
 const relatedPosterWidth = 104;
 const DETAIL_TTL = 10 * 60 * 1000;
@@ -167,6 +169,8 @@ export default function MovieScreen({ route, navigation }: any) {
   const [randomNotice, setRandomNotice] = useState(route.params?.randomNotice || route.params?.movie?.randomNotice || '');
   const [showOnline, setShowOnline] = useState(false);
   const [showTrailer, setShowTrailer] = useState(false);
+  // Cast is capped to keep the first paint light; the user can reveal the rest.
+  const [castExpanded, setCastExpanded] = useState(false);
   const relatedAbortRef = useRef<AbortController | null>(null);
   const loadNextAbortRef = useRef<AbortController | null>(null);
   const { width } = useWindowDimensions();
@@ -193,6 +197,9 @@ export default function MovieScreen({ route, navigation }: any) {
     : (movie.titleRu || movie.titleEn || '');
   const activePreciseFilters = movie.preciseFilters || route.params?.preciseFilters || defaultPreciseFilters;
   const activeRandomGenres = movie.selectedGenres || (movie.genreId ? [movie.genreId] : [0]);
+  const CAST_PREVIEW = 12;
+  const fullCast = movie.cast || [];
+  const visibleCast = castExpanded ? fullCast : fullCast.slice(0, CAST_PREVIEW);
 
   // Initialize related items when the movie changes OR when recommendations
   // arrive via hydration. Depending on movie.id alone misses the hydrate case:
@@ -203,7 +210,7 @@ export default function MovieScreen({ route, navigation }: any) {
     setRelatedItems(recs);
     setRelatedPage(1);
     setRelatedHasMore((movie.recommendationsTotalPages || 1) > 1);
-  }, [movie.id, movie.recommendations]);
+  }, [movie.id, movie.recommendations, movie.recommendationsTotalPages]);
 
   useEffect(() => {
     return () => {
@@ -236,7 +243,7 @@ export default function MovieScreen({ route, navigation }: any) {
       mounted = false;
       controller.abort();
     };
-  }, [movie.id, movie.mediaType]);
+  }, [movie.cast, movie.id, movie.mediaType, movie.providers, movie.recommendations]);
 
   const loadMoreRelated = async () => {
     if (relatedLoadingMore || !relatedHasMore || !movie.id) return;
@@ -267,6 +274,7 @@ export default function MovieScreen({ route, navigation }: any) {
   };
 
   const toggleWatchlist = () => {
+    tapLight();
     if (inWatchlist) removeFromWatchlist(movie.id, movie.mediaType);
     else addToWatchlist(movie);
   };
@@ -306,6 +314,7 @@ export default function MovieScreen({ route, navigation }: any) {
 
   const loadNext = async () => {
     if (!canLoadRandom || loadingNext) return;
+    tapMedium();
     loadNextAbortRef.current?.abort();
     const controller = new AbortController();
     loadNextAbortRef.current = controller;
@@ -342,10 +351,10 @@ export default function MovieScreen({ route, navigation }: any) {
 
   if (skeletonVisible) {
     return (
-      <LinearGradient colors={['#0f0f1a', '#1a1a2e']} style={styles.container}>
+      <LinearGradient colors={gradients.app} style={styles.container}>
         <ScrollView contentContainerStyle={styles.scroll}>
           <TouchableOpacity style={styles.back} onPress={() => navigation.goBack()}>
-            <Ionicons name="chevron-back" size={20} color="#aaa" />
+            <Ionicons name="chevron-back" size={20} color={colors.textSoft} />
             <Text style={styles.backText}>Назад</Text>
           </TouchableOpacity>
           <MovieDetailSkeleton />
@@ -355,11 +364,11 @@ export default function MovieScreen({ route, navigation }: any) {
   }
 
   return (
-    <LinearGradient colors={['#0f0f1a', '#1a1a2e']} style={styles.container}>
+    <LinearGradient colors={gradients.app} style={styles.container}>
       <ScrollView contentContainerStyle={styles.scroll}>
         <View style={styles.topRow}>
           <TouchableOpacity style={styles.back} onPress={() => navigation.goBack()}>
-            <Ionicons name="chevron-back" size={20} color="#aaa" />
+            <Ionicons name="chevron-back" size={20} color={colors.textSoft} />
             <Text style={styles.backText}>Назад</Text>
           </TouchableOpacity>
           <View style={styles.topActions}>
@@ -368,18 +377,30 @@ export default function MovieScreen({ route, navigation }: any) {
                 style={[styles.iconBtn, styles.rerollBtn, loadingNext && styles.iconBtnDisabled]}
                 onPress={loadNext}
                 disabled={loadingNext}
+                accessibilityRole="button"
+                accessibilityLabel="Показать другой случайный тайтл"
               >
-                <Ionicons name="shuffle" size={20} color="#e50914" />
+                <Ionicons name="shuffle" size={20} color={colors.primary} />
               </TouchableOpacity>
             )}
             {movie.id && (
-              <TouchableOpacity style={styles.iconBtn} onPress={handleShare}>
-                <Ionicons name="share-outline" size={20} color="#aaa" />
+              <TouchableOpacity
+                style={styles.iconBtn}
+                onPress={handleShare}
+                accessibilityRole="button"
+                accessibilityLabel="Поделиться"
+              >
+                <Ionicons name="share-outline" size={20} color={colors.textSoft} />
               </TouchableOpacity>
             )}
             {movie.id && (
-              <TouchableOpacity style={styles.iconBtn} onPress={toggleWatchlist}>
-                <Ionicons name={inWatchlist ? 'heart' : 'heart-outline'} size={20} color={inWatchlist ? '#e50914' : '#aaa'} />
+              <TouchableOpacity
+                style={styles.iconBtn}
+                onPress={toggleWatchlist}
+                accessibilityRole="button"
+                accessibilityLabel={inWatchlist ? 'Убрать из избранного' : 'Добавить в избранное'}
+              >
+                <Ionicons name={inWatchlist ? 'heart' : 'heart-outline'} size={20} color={inWatchlist ? colors.primary : colors.textSoft} />
               </TouchableOpacity>
             )}
           </View>
@@ -389,7 +410,7 @@ export default function MovieScreen({ route, navigation }: any) {
           <Image source={{ uri: movie.poster }} style={styles.poster} contentFit="cover" transition={300} cachePolicy="memory-disk" />
         ) : (
           <View style={[styles.poster, styles.posterFallback]}>
-            <Ionicons name="image-outline" size={42} color="#555" />
+            <Ionicons name="image-outline" size={42} color={colors.faint} />
           </View>
         )}
 
@@ -398,7 +419,7 @@ export default function MovieScreen({ route, navigation }: any) {
         <View style={styles.metaRow}>
           {movie.rating && (
             <View style={styles.badge}>
-              <Ionicons name="star" size={12} color="#FFD700" />
+              <Ionicons name="star" size={12} color={colors.warning} />
               <Text style={styles.badgeText}>{movie.rating}</Text>
             </View>
           )}
@@ -413,12 +434,45 @@ export default function MovieScreen({ route, navigation }: any) {
 
         {hydrating && (
           <View style={styles.inlineLoading}>
-            <ActivityIndicator size="small" color="#e50914" />
+            <ActivityIndicator size="small" color={colors.primary} />
             <Text style={styles.inlineLoadingText}>Загружаем детали...</Text>
           </View>
         )}
 
         <Text style={styles.overview}>{movie.overview || 'Описание пока недоступно.'}</Text>
+
+        <View style={styles.quickActions}>
+          <TouchableOpacity
+            style={[styles.quickAction, inWatchlist && styles.quickActionActive]}
+            onPress={toggleWatchlist}
+          >
+            <Ionicons
+              name={inWatchlist ? 'heart' : 'heart-outline'}
+              size={16}
+              color={inWatchlist ? colors.text : colors.accent}
+            />
+            <Text style={[styles.quickActionText, inWatchlist && styles.quickActionTextActive]}>
+              {inWatchlist ? 'В избранном' : 'В избранное'}
+            </Text>
+          </TouchableOpacity>
+
+          {movie.trailerKey ? (
+            <TouchableOpacity style={[styles.quickAction, styles.quickActionPrimary]} onPress={() => setShowTrailer(true)}>
+              <Ionicons name="play-circle" size={16} color={colors.text} />
+              <Text style={styles.quickActionTextActive}>Трейлер</Text>
+            </TouchableOpacity>
+          ) : (
+            <View style={[styles.quickAction, styles.quickActionDisabled]}>
+              <Ionicons name="videocam-off-outline" size={16} color={colors.faint} />
+              <Text style={styles.quickActionDisabledText}>Нет трейлера</Text>
+            </View>
+          )}
+
+          <TouchableOpacity style={styles.quickAction} onPress={() => setShowOnline(true)}>
+            <Ionicons name="globe-outline" size={16} color={colors.accent} />
+            <Text style={styles.quickActionText}>Где смотреть</Text>
+          </TouchableOpacity>
+        </View>
 
         <View style={styles.statusBlock}>
           <Text style={styles.blockTitle}>Моя оценка</Text>
@@ -430,11 +484,15 @@ export default function MovieScreen({ route, navigation }: any) {
                   key={status.key}
                   style={[styles.statusChip, active && styles.statusChipActive]}
                   onPress={() => {
+                    tapLight();
                     if (active) clearUserStatus(movie.id, movie.mediaType);
                     else setUserStatus(movie, status.key);
                   }}
+                  accessibilityRole="button"
+                  accessibilityState={{ selected: active }}
+                  accessibilityLabel={status.label}
                 >
-                  <Ionicons name={status.icon} size={14} color={active ? '#fff' : '#777'} />
+                  <Ionicons name={status.icon} size={14} color={active ? colors.text : colors.muted2} />
                   <Text style={[styles.statusText, active && styles.statusTextActive]}>{status.label}</Text>
                 </TouchableOpacity>
               );
@@ -449,11 +507,11 @@ export default function MovieScreen({ route, navigation }: any) {
           </View>
         )}
 
-        {movie.cast?.length > 0 && (
+        {visibleCast.length > 0 && (
           <View style={styles.infoBlock}>
             <Text style={styles.blockTitle}>Актеры</Text>
             <View style={styles.castRow}>
-              {movie.cast.map((p: any) => (
+              {visibleCast.map((p: any) => (
                 <TouchableOpacity
                   key={p.id}
                   style={styles.castChip}
@@ -462,6 +520,26 @@ export default function MovieScreen({ route, navigation }: any) {
                   <Text style={styles.castChipText}>{p.name}</Text>
                 </TouchableOpacity>
               ))}
+              {!castExpanded && fullCast.length > visibleCast.length && (
+                <TouchableOpacity
+                  style={styles.castMoreChip}
+                  onPress={() => setCastExpanded(true)}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Показать всех актёров, ещё ${fullCast.length - visibleCast.length}`}
+                >
+                  <Text style={styles.castMoreText}>+{fullCast.length - visibleCast.length}</Text>
+                </TouchableOpacity>
+              )}
+              {castExpanded && fullCast.length > CAST_PREVIEW && (
+                <TouchableOpacity
+                  style={styles.castMoreChip}
+                  onPress={() => setCastExpanded(false)}
+                  accessibilityRole="button"
+                  accessibilityLabel="Свернуть список актёров"
+                >
+                  <Text style={styles.castMoreText}>Свернуть</Text>
+                </TouchableOpacity>
+              )}
             </View>
           </View>
         )}
@@ -483,13 +561,6 @@ export default function MovieScreen({ route, navigation }: any) {
           </View>
         ) : null}
 
-        {movie.trailerKey && (
-          <TouchableOpacity style={styles.trailerBtn} onPress={() => setShowTrailer(true)}>
-            <Ionicons name="play-circle" size={20} color="#fff" />
-            <Text style={styles.trailerText}>Смотреть трейлер</Text>
-          </TouchableOpacity>
-        )}
-
         {showTrailer && movie.trailerKey && (
           <View style={[styles.videoContainer, { width: videoWidth }]}>
             <YoutubePlayer
@@ -506,27 +577,15 @@ export default function MovieScreen({ route, navigation }: any) {
               }}
             />
             <TouchableOpacity style={styles.closeVideo} onPress={() => setShowTrailer(false)}>
-              <Ionicons name="close-circle" size={20} color="#aaa" />
+              <Ionicons name="close-circle" size={20} color={colors.textSoft} />
               <Text style={styles.closeVideoText}>Закрыть трейлер</Text>
             </TouchableOpacity>
             <TouchableOpacity style={styles.youtubeFallback} onPress={openTrailerInYouTube}>
-              <Ionicons name="logo-youtube" size={18} color="#e50914" />
+              <Ionicons name="logo-youtube" size={18} color={colors.primary} />
               <Text style={styles.youtubeFallbackText}>Открыть на YouTube</Text>
             </TouchableOpacity>
           </View>
         )}
-
-        {!movie.trailerKey && (
-          <View style={styles.noTrailer}>
-            <Ionicons name="videocam-off-outline" size={16} color="#555" />
-            <Text style={styles.noTrailerText}>Трейлер недоступен</Text>
-          </View>
-        )}
-
-        <TouchableOpacity style={styles.onlineBtn} onPress={() => setShowOnline(true)}>
-          <Ionicons name="globe-outline" size={20} color="#8888ff" />
-          <Text style={styles.onlineBtnText}>Сервисы просмотра</Text>
-        </TouchableOpacity>
 
         {relatedItems.length > 0 && (
           <View style={styles.relatedBlock}>
@@ -556,7 +615,7 @@ export default function MovieScreen({ route, navigation }: any) {
               ListFooterComponent={
                 relatedLoadingMore ? (
                   <View style={styles.relatedLoadingWrap}>
-                    <ActivityIndicator size="small" color="#555" />
+                    <ActivityIndicator size="small" color={colors.faint} />
                   </View>
                 ) : null
               }
@@ -571,7 +630,7 @@ export default function MovieScreen({ route, navigation }: any) {
             </View>
           ) : (
             <TouchableOpacity style={styles.randomBtn} onPress={loadNext}>
-              <Ionicons name="shuffle" size={20} color="#e50914" />
+              <Ionicons name="shuffle" size={20} color={colors.primary} />
               <Text style={styles.randomText}>
                 Случайный {movie.mediaType === 'tv' ? 'сериал' : 'фильм'}
               </Text>
@@ -605,13 +664,13 @@ export default function MovieScreen({ route, navigation }: any) {
             {ONLINE_SOURCES.map(source => (
               <TouchableOpacity key={source.key} style={styles.sourceBtn} onPress={() => openSource(source)}>
                 <View style={styles.sourceIconWrap}>
-                  <Ionicons name={source.icon as any} size={22} color="#e50914" />
+                  <Ionicons name={source.icon as any} size={22} color={colors.primary} />
                 </View>
                 <View style={styles.sourceInfo}>
                   <Text style={styles.sourceName}>{source.name}</Text>
                   <Text style={styles.sourceHint}>Открыть и найти</Text>
                 </View>
-                <Ionicons name="chevron-forward" size={18} color="#444" />
+                <Ionicons name="chevron-forward" size={18} color={colors.faint} />
               </TouchableOpacity>
             ))}
 
@@ -630,72 +689,76 @@ const styles = StyleSheet.create({
   scroll: { alignItems: 'center', padding: 20, paddingTop: 60, paddingBottom: 36 },
   topRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', width: '100%', marginBottom: 20 },
   back: { flexDirection: 'row', alignItems: 'center', gap: 4 },
-  backText: { color: '#aaa', fontSize: 14 },
+  backText: { color: colors.textSoft, fontSize: 14, fontWeight: '700' },
   topActions: { flexDirection: 'row', gap: 8 },
-  iconBtn: { backgroundColor: '#1e1e30', borderRadius: 12, width: 38, height: 38, alignItems: 'center', justifyContent: 'center' },
-  rerollBtn: { borderWidth: 1, borderColor: '#e50914' },
+  iconBtn: { backgroundColor: colors.surfaceElevated, borderRadius: radii.md, width: 38, height: 38, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: colors.borderSoft },
+  rerollBtn: { borderColor: colors.primary },
   iconBtnDisabled: { opacity: 0.4 },
-  poster: { width: 220, height: 330, borderRadius: 16, marginBottom: 24 },
-  posterFallback: { backgroundColor: '#1e1e30', alignItems: 'center', justifyContent: 'center' },
-  title: { fontSize: 20, fontWeight: 'bold', color: '#fff', textAlign: 'center', marginBottom: 12 },
+  poster: { width: 220, height: 330, borderRadius: radii.lg, marginBottom: 24, backgroundColor: colors.surface, ...shadow.card },
+  posterFallback: { backgroundColor: colors.surfaceElevated, alignItems: 'center', justifyContent: 'center' },
+  title: { fontSize: 22, fontWeight: '900', color: colors.text, textAlign: 'center', marginBottom: 12 },
   metaRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, justifyContent: 'center', marginBottom: 10 },
-  badge: { flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: '#1e1e30', paddingHorizontal: 12, paddingVertical: 6, borderRadius: 12 },
-  badgeText: { color: '#fff', fontSize: 13 },
-  genres: { color: '#aaa', fontSize: 13, textAlign: 'center', marginBottom: 16 },
+  badge: { flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: colors.surfaceElevated, paddingHorizontal: 12, paddingVertical: 6, borderRadius: radii.pill, borderWidth: 1, borderColor: colors.borderSoft },
+  badgeText: { color: colors.text, fontSize: 13, fontWeight: '700' },
+  genres: { color: colors.muted, fontSize: 13, textAlign: 'center', marginBottom: 16 },
   inlineLoading: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 12 },
-  inlineLoadingText: { color: '#777', fontSize: 13 },
-  overview: { fontSize: 14, color: '#ccc', textAlign: 'center', lineHeight: 22, marginBottom: 20 },
+  inlineLoadingText: { color: colors.muted2, fontSize: 13 },
+  overview: { fontSize: 14, color: colors.textSoft, textAlign: 'center', lineHeight: 22, marginBottom: 20 },
+  quickActions: { width: '100%', flexDirection: 'row', flexWrap: 'wrap', gap: 8, justifyContent: 'center', marginBottom: 20 },
+  quickAction: { minHeight: 40, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, backgroundColor: colors.accentSoft, borderWidth: 1, borderColor: colors.border, paddingHorizontal: 14, paddingVertical: 9, borderRadius: radii.pill },
+  quickActionPrimary: { backgroundColor: colors.primary, borderColor: colors.primary },
+  quickActionActive: { backgroundColor: colors.primary, borderColor: colors.primary },
+  quickActionDisabled: { backgroundColor: colors.surface, borderColor: colors.borderSoft },
+  quickActionText: { color: colors.textSoft, fontSize: 13, fontWeight: '800' },
+  quickActionTextActive: { color: colors.text, fontSize: 13, fontWeight: '800' },
+  quickActionDisabledText: { color: colors.muted2, fontSize: 13, fontWeight: '700' },
   statusBlock: { width: '100%', marginBottom: 20 },
-  blockTitle: { color: '#fff', fontSize: 16, fontWeight: '700', marginBottom: 10 },
+  blockTitle: { color: colors.text, fontSize: 16, fontWeight: '800', marginBottom: 10 },
   statusRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
-  statusChip: { flexDirection: 'row', alignItems: 'center', gap: 6, borderWidth: 1, borderColor: '#333', borderRadius: 18, paddingHorizontal: 12, paddingVertical: 8 },
-  statusChipActive: { backgroundColor: '#e50914', borderColor: '#e50914' },
-  statusText: { color: '#777', fontSize: 12, fontWeight: '600' },
-  statusTextActive: { color: '#fff' },
-  infoBlock: { width: '100%', backgroundColor: '#1e1e30', borderRadius: 14, padding: 14, marginBottom: 12 },
-  infoText: { color: '#ccc', fontSize: 14, lineHeight: 20 },
-  noticeBox: { backgroundColor: '#1e1e40', borderWidth: 1, borderColor: '#8888ff', borderRadius: 12, padding: 14, marginBottom: 16, width: '100%' },
-  noticeText: { color: '#bbb', fontSize: 13, textAlign: 'center' },
-  errorBox: { backgroundColor: '#2a0a0a', borderRadius: 12, padding: 16, marginBottom: 16, alignItems: 'center', width: '100%' },
-  errorText: { color: '#e50914', fontSize: 14, textAlign: 'center', marginBottom: 8 },
-  retryText: { color: '#fff', fontSize: 14, fontWeight: '600' },
-  trailerBtn: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: '#e50914', paddingHorizontal: 32, paddingVertical: 14, borderRadius: 30, marginBottom: 12 },
-  trailerText: { color: '#fff', fontWeight: '700', fontSize: 16 },
-  videoContainer: { marginBottom: 16, borderRadius: 12, overflow: 'hidden' },
+  statusChip: { flexDirection: 'row', alignItems: 'center', gap: 6, borderWidth: 1, borderColor: colors.borderSoft, borderRadius: radii.pill, paddingHorizontal: 12, paddingVertical: 8, backgroundColor: colors.surface },
+  statusChipActive: { backgroundColor: colors.primary, borderColor: colors.primary },
+  statusText: { color: colors.muted, fontSize: 12, fontWeight: '700' },
+  statusTextActive: { color: colors.text },
+  infoBlock: { width: '100%', backgroundColor: colors.surfaceElevated, borderRadius: radii.lg, padding: 14, marginBottom: 12, borderWidth: 1, borderColor: colors.borderSoft },
+  infoText: { color: colors.textSoft, fontSize: 14, lineHeight: 20 },
+  noticeBox: { backgroundColor: colors.accentSoft, borderWidth: 1, borderColor: colors.border, borderRadius: radii.md, padding: 14, marginBottom: 16, width: '100%' },
+  noticeText: { color: colors.textSoft, fontSize: 13, textAlign: 'center' },
+  errorBox: { backgroundColor: colors.dangerBg, borderRadius: radii.md, padding: 16, marginBottom: 16, alignItems: 'center', width: '100%', borderWidth: 1, borderColor: colors.primaryDark },
+  errorText: { color: colors.primary, fontSize: 14, textAlign: 'center', marginBottom: 8 },
+  retryText: { color: colors.text, fontSize: 14, fontWeight: '700' },
+  videoContainer: { marginBottom: 16, borderRadius: radii.md, overflow: 'hidden', backgroundColor: colors.bgSoft },
   closeVideo: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, marginTop: 8 },
-  closeVideoText: { color: '#aaa', fontSize: 13 },
+  closeVideoText: { color: colors.textSoft, fontSize: 13 },
   youtubeFallback: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, marginTop: 10 },
-  youtubeFallbackText: { color: '#e50914', fontSize: 13, fontWeight: '600' },
-  noTrailer: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: '#1e1e30', paddingHorizontal: 24, paddingVertical: 12, borderRadius: 30, marginBottom: 12 },
-  noTrailerText: { color: '#888', fontSize: 14 },
-  onlineBtn: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: '#1e1e40', borderWidth: 1, borderColor: '#8888ff', paddingHorizontal: 32, paddingVertical: 14, borderRadius: 30, marginBottom: 12 },
-  onlineBtnText: { color: '#8888ff', fontWeight: '700', fontSize: 16 },
+  youtubeFallbackText: { color: colors.primary, fontSize: 13, fontWeight: '700' },
   relatedBlock: { width: '100%', marginBottom: 16 },
   relatedCard: { width: relatedPosterWidth, marginRight: 10 },
-  relatedPoster: { width: relatedPosterWidth, height: relatedPosterWidth * 1.5, borderRadius: 10, marginBottom: 6 },
-  relatedTitle: { color: '#ccc', fontSize: 11, textAlign: 'center' },
+  relatedPoster: { width: relatedPosterWidth, height: relatedPosterWidth * 1.5, borderRadius: radii.md, marginBottom: 6, backgroundColor: colors.surface },
+  relatedTitle: { color: colors.textSoft, fontSize: 11, textAlign: 'center', fontWeight: '600' },
   relatedLoadingWrap: { width: relatedPosterWidth, alignItems: 'center', justifyContent: 'center' },
   loadingNext: { paddingVertical: 16, alignItems: 'center' },
-  loadingNextText: { color: '#aaa', fontSize: 14 },
-  randomBtn: { flexDirection: 'row', alignItems: 'center', gap: 8, borderWidth: 1, borderColor: '#e50914', paddingHorizontal: 32, paddingVertical: 14, borderRadius: 30, marginTop: 8 },
-  randomText: { color: '#e50914', fontWeight: '700', fontSize: 16 },
-  modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'flex-end' },
-  sheet: { backgroundColor: '#1a1a2e', borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 24, paddingBottom: 40, maxHeight: '88%' },
-  sheetHandle: { width: 40, height: 4, backgroundColor: '#444', borderRadius: 2, alignSelf: 'center', marginBottom: 20 },
-  sheetTitle: { fontSize: 20, fontWeight: 'bold', color: '#fff', marginBottom: 4 },
-  sheetSubtitle: { fontSize: 13, color: '#aaa', marginBottom: 16 },
+  loadingNextText: { color: colors.textSoft, fontSize: 14 },
+  randomBtn: { flexDirection: 'row', alignItems: 'center', gap: 8, borderWidth: 1, borderColor: colors.primary, paddingHorizontal: 32, paddingVertical: 14, borderRadius: radii.pill, marginTop: 8 },
+  randomText: { color: colors.primary, fontWeight: '800', fontSize: 16 },
+  modalOverlay: { flex: 1, backgroundColor: colors.overlay, justifyContent: 'flex-end' },
+  sheet: { backgroundColor: colors.surfaceElevated, borderTopLeftRadius: radii.xl, borderTopRightRadius: radii.xl, padding: 24, paddingBottom: 40, maxHeight: '88%', borderWidth: 1, borderColor: colors.border },
+  sheetHandle: { width: 40, height: 4, backgroundColor: colors.faint, borderRadius: 2, alignSelf: 'center', marginBottom: 20 },
+  sheetTitle: { fontSize: 20, fontWeight: '900', color: colors.text, marginBottom: 4 },
+  sheetSubtitle: { fontSize: 13, color: colors.textSoft, marginBottom: 16 },
   providerGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginBottom: 18 },
   providerItem: { width: 70, alignItems: 'center' },
-  providerLogo: { width: 44, height: 44, borderRadius: 10, marginBottom: 5 },
-  providerName: { color: '#aaa', fontSize: 10, textAlign: 'center' },
-  sourceBtn: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#0f0f1a', borderRadius: 16, padding: 16, marginBottom: 10 },
-  sourceIconWrap: { width: 44, height: 44, backgroundColor: '#1e1e30', borderRadius: 12, alignItems: 'center', justifyContent: 'center', marginRight: 14 },
+  providerLogo: { width: 44, height: 44, borderRadius: radii.md, marginBottom: 5 },
+  providerName: { color: colors.textSoft, fontSize: 10, textAlign: 'center' },
+  sourceBtn: { flexDirection: 'row', alignItems: 'center', backgroundColor: colors.bgSoft, borderRadius: radii.lg, padding: 16, marginBottom: 10, borderWidth: 1, borderColor: colors.borderSoft },
+  sourceIconWrap: { width: 44, height: 44, backgroundColor: colors.surfaceElevated, borderRadius: radii.md, alignItems: 'center', justifyContent: 'center', marginRight: 14 },
   sourceInfo: { flex: 1 },
-  sourceName: { color: '#fff', fontWeight: '600', fontSize: 16 },
-  sourceHint: { color: '#888', fontSize: 12, marginTop: 2 },
+  sourceName: { color: colors.text, fontWeight: '800', fontSize: 16 },
+  sourceHint: { color: colors.muted, fontSize: 12, marginTop: 2 },
   cancelBtn: { alignItems: 'center', marginTop: 8, paddingVertical: 14 },
-  cancelText: { color: '#aaa', fontSize: 16 },
+  cancelText: { color: colors.textSoft, fontSize: 16 },
   castRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 4 },
-  castChip: { backgroundColor: '#0f0f1a', borderWidth: 1, borderColor: '#2a2a44', borderRadius: 16, paddingHorizontal: 12, paddingVertical: 6 },
-  castChipText: { color: '#8888ff', fontSize: 13 },
+  castChip: { backgroundColor: colors.bgSoft, borderWidth: 1, borderColor: colors.borderSoft, borderRadius: radii.pill, paddingHorizontal: 12, paddingVertical: 6 },
+  castChipText: { color: colors.accent, fontSize: 13, fontWeight: '700' },
+  castMoreChip: { backgroundColor: colors.accentSoft, borderWidth: 1, borderColor: colors.border, borderRadius: radii.pill, paddingHorizontal: 12, paddingVertical: 6 },
+  castMoreText: { color: colors.muted, fontSize: 13, fontWeight: '800' },
 });

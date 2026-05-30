@@ -15,6 +15,7 @@ import SettingsScreen from './screens/SettingsScreen';
 import TopScreen from './screens/TopScreen';
 import { AppProvider, useAppContext } from './store/AppContext';
 import ErrorBoundary from './components/ErrorBoundary';
+import { colors, radii, shadow } from './constants/theme';
 
 const Tab = createBottomTabNavigator();
 const CatalogStack = createStackNavigator();
@@ -100,36 +101,14 @@ function TabIcon({
 
 const ONBOARDING_SLIDES = [
   {
-    icon: 'shuffle' as const,
-    iconBg: '#e50914',
-    title: 'FilmRoulette',
-    text: 'Подбирай случайные фильмы и сериалы одним нажатием. Настраивай жанр, год, рейтинг и страну — рулетка сама найдёт что-то интересное.',
-    items: [
-      { icon: 'film-outline' as const, label: 'Каталог с жанрами и фильтрами' },
-      { icon: 'shuffle-outline' as const, label: 'Случайный подбор за секунду' },
-      { icon: 'play-circle-outline' as const, label: 'Трейлер прямо в приложении' },
-    ],
-  },
-  {
     icon: 'sparkles' as const,
-    iconBg: '#5533cc',
-    title: 'ИИ-подборщик',
-    text: 'Опиши настроение или вайб словами — ИИ проанализирует запрос и подберёт релевантные тайтлы специально для тебя, включая свежие новинки.',
+    iconBg: colors.primary,
+    title: 'MediaRoulette',
+    text: 'Опиши настроение, выбери случайный тайтл или открой топы. Главная идея простая: быстрее решить, что смотреть сегодня.',
     items: [
-      { icon: 'mic-outline' as const, label: 'Голосовой ввод запроса' },
-      { icon: 'sparkles-outline' as const, label: 'Анализ вайба + веб-поиск новинок' },
-      { icon: 'grid-outline' as const, label: 'Десятки релевантных результатов' },
-    ],
-  },
-  {
-    icon: 'heart' as const,
-    iconBg: '#e50914',
-    title: 'Избранное и оценки',
-    text: 'Сохраняй находки в избранное, ставь оценки и следи за своей коллекцией. Все данные хранятся локально на устройстве.',
-    items: [
-      { icon: 'bookmark-outline' as const, label: 'Хочу / Смотрел / Понравилось' },
-      { icon: 'heart-outline' as const, label: 'Избранное с поиском и фильтрами' },
-      { icon: 'phone-portrait-outline' as const, label: 'Всё хранится на устройстве' },
+      { icon: 'sparkles-outline' as const, label: 'ИИ-подбор по вайбу и свежим релизам' },
+      { icon: 'shuffle-outline' as const, label: 'Рулетка, когда не хочется выбирать' },
+      { icon: 'heart-outline' as const, label: 'Избранное и личные отметки' },
     ],
   },
 ];
@@ -150,7 +129,7 @@ function OnboardingModal() {
       <View style={styles.onboardingOverlay}>
         <View style={styles.onboardingCard}>
           <View style={[styles.onboardingIcon, { backgroundColor: current.iconBg }]}>
-            <Ionicons name={current.icon} size={28} color="#fff" />
+            <Ionicons name={current.icon} size={28} color={colors.text} />
           </View>
 
           <Text style={styles.onboardingTitle}>{current.title}</Text>
@@ -159,7 +138,7 @@ function OnboardingModal() {
           <View style={styles.onboardingList}>
             {current.items.map(item => (
               <View key={item.label} style={styles.onboardingItem}>
-                <Ionicons name={item.icon} size={18} color="#8888ff" />
+                <Ionicons name={item.icon} size={18} color={colors.accent} />
                 <Text style={styles.onboardingItemText}>{item.label}</Text>
               </View>
             ))}
@@ -172,7 +151,7 @@ function OnboardingModal() {
           </View>
 
           <TouchableOpacity style={styles.onboardingBtn} onPress={handleNext}>
-            <Text style={styles.onboardingBtnText}>{isLast ? 'Начать' : 'Далее →'}</Text>
+            <Text style={styles.onboardingBtnText}>{isLast ? 'Начать подбор' : 'Далее'}</Text>
           </TouchableOpacity>
 
           {!isLast && (
@@ -201,8 +180,8 @@ function AppTabs() {
         screenOptions={{
           headerShown: false,
           tabBarStyle: styles.tabBar,
-          tabBarActiveTintColor: '#fff',
-          tabBarInactiveTintColor: '#555',
+          tabBarActiveTintColor: colors.text,
+          tabBarInactiveTintColor: colors.muted2,
           tabBarLabelStyle: styles.tabLabel,
         }}
       >
@@ -210,7 +189,7 @@ function AppTabs() {
           name="Mood"
           component={MoodStackScreen}
           options={{
-            tabBarLabel: 'ИИ',
+            tabBarLabel: 'Подбор',
             tabBarIcon: ({ focused, color }) => (
               <TabIcon name={focused ? 'sparkles' : 'sparkles-outline'} focused={focused} color={color} />
             ),
@@ -291,10 +270,10 @@ export default function App() {
 }
 
 const styles = StyleSheet.create({
-  splash: { flex: 1, backgroundColor: '#0f0f1a' },
+  splash: { flex: 1, backgroundColor: colors.bg },
   tabBar: {
-    backgroundColor: '#0f0f1a',
-    borderTopColor: '#1e1e30',
+    backgroundColor: colors.bg,
+    borderTopColor: colors.borderSoft,
     borderTopWidth: 1,
     height: 70,
     paddingBottom: 10,
@@ -303,17 +282,17 @@ const styles = StyleSheet.create({
   tabLabel: {
     fontSize: 11,
     fontWeight: '600',
-    letterSpacing: 0.3,
+    letterSpacing: 0,
   },
   iconContainer: {
     width: 44,
     height: 30,
     alignItems: 'center',
     justifyContent: 'center',
-    borderRadius: 12,
+    borderRadius: radii.md,
   },
   iconContainerActive: {
-    backgroundColor: '#e50914',
+    backgroundColor: colors.primary,
   },
   badge: {
     position: 'absolute',
@@ -322,50 +301,51 @@ const styles = StyleSheet.create({
     minWidth: 16,
     height: 16,
     borderRadius: 8,
-    backgroundColor: '#e50914',
+    backgroundColor: colors.primary,
     alignItems: 'center',
     justifyContent: 'center',
     paddingHorizontal: 4,
     borderWidth: 1,
-    borderColor: '#0f0f1a',
+    borderColor: colors.bg,
   },
   badgeText: {
-    color: '#fff',
+    color: colors.text,
     fontSize: 9,
     fontWeight: '800',
   },
   onboardingOverlay: {
     flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.72)',
+    backgroundColor: colors.overlay,
     alignItems: 'center',
     justifyContent: 'center',
     padding: 24,
   },
   onboardingCard: {
     width: '100%',
-    backgroundColor: '#1a1a2e',
-    borderRadius: 22,
+    backgroundColor: colors.surfaceElevated,
+    borderRadius: radii.xl,
     padding: 24,
     borderWidth: 1,
-    borderColor: '#2a2a44',
+    borderColor: colors.border,
+    ...shadow.card,
   },
   onboardingIcon: {
     width: 56,
     height: 56,
-    borderRadius: 18,
-    backgroundColor: '#e50914',
+    borderRadius: radii.lg,
+    backgroundColor: colors.primary,
     alignItems: 'center',
     justifyContent: 'center',
     marginBottom: 18,
   },
   onboardingTitle: {
-    color: '#fff',
+    color: colors.text,
     fontSize: 26,
     fontWeight: '800',
     marginBottom: 8,
   },
   onboardingText: {
-    color: '#aaa',
+    color: colors.textSoft,
     fontSize: 15,
     lineHeight: 22,
     marginBottom: 18,
@@ -380,7 +360,7 @@ const styles = StyleSheet.create({
     gap: 10,
   },
   onboardingItemText: {
-    color: '#ccc',
+    color: colors.textSoft,
     fontSize: 14,
     flex: 1,
   },
@@ -394,21 +374,21 @@ const styles = StyleSheet.create({
     width: 8,
     height: 8,
     borderRadius: 4,
-    backgroundColor: '#333',
+    backgroundColor: colors.border,
   },
   onboardingDotActive: {
-    backgroundColor: '#e50914',
+    backgroundColor: colors.primary,
     width: 20,
   },
   onboardingBtn: {
-    backgroundColor: '#e50914',
-    borderRadius: 28,
+    backgroundColor: colors.primary,
+    borderRadius: radii.pill,
     paddingVertical: 15,
     alignItems: 'center',
     marginBottom: 10,
   },
   onboardingBtnText: {
-    color: '#fff',
+    color: colors.text,
     fontSize: 16,
     fontWeight: '800',
   },
@@ -417,7 +397,7 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
   },
   onboardingSkipText: {
-    color: '#555',
+    color: colors.muted2,
     fontSize: 14,
   },
 });

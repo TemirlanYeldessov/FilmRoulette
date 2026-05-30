@@ -9,11 +9,12 @@ import {
   Text,
   TextInput,
   TouchableOpacity,
-  useWindowDimensions,
   View,
 } from 'react-native';
 import { Swipeable } from 'react-native-gesture-handler';
 import { useAppContext } from '../store/AppContext';
+import { useGridColumns } from '../utils/useGridColumns';
+import { colors, gradients, radii, shadow } from '../constants/theme';
 
 const TYPE_FILTERS = [
   { key: 'all', label: 'Все' },
@@ -46,7 +47,7 @@ const STATUS_LABELS: Record<string, string> = {
 function WatchlistCard({ item, navigation, status, onRemove, cardWidth }: any) {
   const renderRightActions = () => (
     <TouchableOpacity style={styles.swipeDelete} onPress={onRemove}>
-      <Ionicons name="trash-outline" size={20} color="#fff" />
+      <Ionicons name="trash-outline" size={20} color={colors.text} />
       <Text style={styles.swipeDeleteText}>Удалить</Text>
     </TouchableOpacity>
   );
@@ -54,8 +55,8 @@ function WatchlistCard({ item, navigation, status, onRemove, cardWidth }: any) {
   return (
     <Swipeable renderRightActions={renderRightActions} overshootRight={false}>
       <TouchableOpacity style={[styles.card, { width: cardWidth }]} onPress={() => navigation.navigate('Card', { movie: item })}>
-        <TouchableOpacity style={styles.removeBtn} onPress={onRemove}>
-          <Ionicons name="close" size={12} color="#fff" />
+        <TouchableOpacity style={styles.removeBtn} onPress={onRemove} accessibilityRole="button" accessibilityLabel="Удалить из избранного">
+          <Ionicons name="close" size={12} color={colors.text} />
         </TouchableOpacity>
 
         <View style={styles.typeBadge}>
@@ -66,7 +67,7 @@ function WatchlistCard({ item, navigation, status, onRemove, cardWidth }: any) {
           <Image source={{ uri: item.poster }} style={[styles.poster, { width: cardWidth, height: cardWidth * 1.5 }]} contentFit="cover" transition={200} cachePolicy="memory-disk" />
         ) : (
           <View style={[styles.poster, styles.posterFallback, { width: cardWidth, height: cardWidth * 1.5 }]}>
-            <Ionicons name="image-outline" size={32} color="#444" />
+            <Ionicons name="image-outline" size={32} color={colors.faint} />
           </View>
         )}
         <Text style={styles.cardTitle} numberOfLines={2}>{item.titleRu || item.titleEn}</Text>
@@ -88,15 +89,32 @@ function WatchlistCard({ item, navigation, status, onRemove, cardWidth }: any) {
 
 export default function FavoritesScreen({ navigation }: any) {
   const { watchlist, removeFromWatchlist, getUserStatus } = useAppContext();
-  const { width } = useWindowDimensions();
-  const cardWidth = useMemo(() => (width - 52) / 2, [width]);
+  const { columns, cardWidth } = useGridColumns();
   const [query, setQuery] = useState('');
   const [typeFilter, setTypeFilter] = useState('all');
   const [statusFilter, setStatusFilter] = useState('all');
   const [sortBy, setSortBy] = useState('added');
 
+  const hasActiveFilters = query.trim().length > 0 || typeFilter !== 'all' || statusFilter !== 'all' || sortBy !== 'added';
+
+  const resetFilters = () => {
+    setQuery('');
+    setTypeFilter('all');
+    setStatusFilter('all');
+    setSortBy('added');
+  };
+
+  const goToTab = (tab: string) => {
+    const parent = navigation.getParent?.();
+    if (parent) parent.navigate(tab);
+    else navigation.navigate(tab);
+  };
+
   const filteredWatchlist = useMemo(() => {
     const normalized = query.trim().toLowerCase();
+    const addedOrder = new Map(
+      watchlist.map((item, index) => [`${item.id}-${item.mediaType}`, index])
+    );
 
     return [...watchlist]
       .filter(item => {
@@ -110,6 +128,9 @@ export default function FavoritesScreen({ navigation }: any) {
         return true;
       })
       .sort((a, b) => {
+        if (sortBy === 'added') {
+          return (addedOrder.get(`${b.id}-${b.mediaType}`) ?? 0) - (addedOrder.get(`${a.id}-${a.mediaType}`) ?? 0);
+        }
         if (sortBy === 'title') return (a.titleRu || a.titleEn || '').localeCompare(b.titleRu || b.titleEn || '');
         if (sortBy === 'rating') return Number(b.rating || 0) - Number(a.rating || 0);
         if (sortBy === 'year') return Number(b.year || 0) - Number(a.year || 0);
@@ -118,7 +139,7 @@ export default function FavoritesScreen({ navigation }: any) {
   }, [watchlist, query, typeFilter, statusFilter, sortBy, getUserStatus]);
 
   return (
-    <LinearGradient colors={['#0f0f1a', '#1a1a2e']} style={styles.container}>
+    <LinearGradient colors={gradients.app} style={styles.container}>
       <ScrollView contentContainerStyle={styles.scroll}>
         <View style={styles.headerRow}>
           <Text style={styles.header}>Избранное</Text>
@@ -131,24 +152,33 @@ export default function FavoritesScreen({ navigation }: any) {
 
         {watchlist.length === 0 ? (
           <View style={styles.emptyWatchlist}>
-            <Ionicons name="heart-outline" size={44} color="#333" />
+            <Ionicons name="heart-outline" size={44} color={colors.faint} />
             <Text style={styles.emptyTitle}>Избранное пусто</Text>
             <Text style={styles.emptySubtitle}>Открой любой фильм или сериал и нажми ♥, чтобы сохранить</Text>
+            <View style={styles.emptyActions}>
+              <TouchableOpacity style={styles.emptyPrimaryBtn} onPress={() => goToTab('Mood')}>
+                <Ionicons name="sparkles-outline" size={15} color={colors.text} />
+                <Text style={styles.emptyPrimaryText}>Подобрать</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.emptySecondaryBtn} onPress={() => goToTab('Catalog')}>
+                <Text style={styles.emptySecondaryText}>Каталог</Text>
+              </TouchableOpacity>
+            </View>
           </View>
         ) : (
           <>
             <View style={styles.searchInputWrap}>
-              <Ionicons name="search" size={16} color="#888" />
+              <Ionicons name="search" size={16} color={colors.muted} />
               <TextInput
                 style={styles.searchInput}
                 placeholder="Поиск в избранном..."
-                placeholderTextColor="#666"
+                placeholderTextColor={colors.muted2}
                 value={query}
                 onChangeText={setQuery}
               />
               {query.length > 0 && (
                 <TouchableOpacity onPress={() => setQuery('')}>
-                  <Ionicons name="close-circle" size={16} color="#888" />
+                  <Ionicons name="close-circle" size={16} color={colors.muted} />
                 </TouchableOpacity>
               )}
             </View>
@@ -197,15 +227,21 @@ export default function FavoritesScreen({ navigation }: any) {
 
             {filteredWatchlist.length === 0 ? (
               <View style={styles.emptyWatchlist}>
-                <Ionicons name="filter-outline" size={36} color="#333" />
+                <Ionicons name="filter-outline" size={36} color={colors.faint} />
                 <Text style={styles.emptyTitle}>Ничего не найдено</Text>
                 <Text style={styles.emptySubtitle}>Попробуй другой запрос или фильтр</Text>
+                {hasActiveFilters && (
+                  <TouchableOpacity style={styles.emptyBtn} onPress={resetFilters}>
+                    <Text style={styles.emptyBtnText}>Сбросить фильтры</Text>
+                  </TouchableOpacity>
+                )}
               </View>
             ) : (
               <FlatList
                 data={filteredWatchlist}
                 keyExtractor={(item, index) => `${item.id}-${item.mediaType}-${index}`}
-                numColumns={2}
+                key={`grid-${columns}`}
+                numColumns={columns}
                 scrollEnabled={false}
                 columnWrapperStyle={styles.gridRow}
                 renderItem={({ item }) => (
@@ -230,33 +266,40 @@ const styles = StyleSheet.create({
   container: { flex: 1 },
   scroll: { padding: 20, paddingTop: 60, paddingBottom: 40 },
   headerRow: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 20 },
-  header: { fontSize: 28, fontWeight: 'bold', color: '#fff' },
-  countBadge: { backgroundColor: '#e50914', borderRadius: 12, paddingHorizontal: 10, paddingVertical: 3 },
-  countBadgeText: { color: '#fff', fontSize: 13, fontWeight: '700' },
-  emptyWatchlist: { backgroundColor: '#1e1e30', borderRadius: 16, padding: 32, alignItems: 'center', gap: 8, marginTop: 8 },
-  emptyTitle: { color: '#ccc', fontSize: 16, fontWeight: '600' },
-  emptySubtitle: { color: '#888', fontSize: 13, textAlign: 'center', lineHeight: 19 },
-  searchInputWrap: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#1e1e30', borderRadius: 12, paddingHorizontal: 12, height: 44, marginBottom: 12, gap: 8 },
-  searchInput: { flex: 1, color: '#fff', fontSize: 14 },
+  header: { fontSize: 28, fontWeight: '900', color: colors.text },
+  countBadge: { backgroundColor: colors.primary, borderRadius: radii.pill, paddingHorizontal: 10, paddingVertical: 3 },
+  countBadgeText: { color: colors.text, fontSize: 13, fontWeight: '800' },
+  emptyWatchlist: { backgroundColor: colors.surfaceElevated, borderRadius: radii.lg, padding: 32, alignItems: 'center', gap: 8, marginTop: 8, borderWidth: 1, borderColor: colors.border, ...shadow.card },
+  emptyTitle: { color: colors.textSoft, fontSize: 16, fontWeight: '800' },
+  emptySubtitle: { color: colors.muted, fontSize: 13, textAlign: 'center', lineHeight: 19 },
+  emptyActions: { flexDirection: 'row', gap: 10, marginTop: 8 },
+  emptyPrimaryBtn: { flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: colors.primary, paddingHorizontal: 18, paddingVertical: 10, borderRadius: radii.pill },
+  emptyPrimaryText: { color: colors.text, fontSize: 13, fontWeight: '800' },
+  emptySecondaryBtn: { backgroundColor: colors.accentSoft, borderWidth: 1, borderColor: colors.border, paddingHorizontal: 18, paddingVertical: 10, borderRadius: radii.pill },
+  emptySecondaryText: { color: colors.textSoft, fontSize: 13, fontWeight: '800' },
+  emptyBtn: { backgroundColor: colors.accentSoft, borderWidth: 1, borderColor: colors.border, paddingHorizontal: 18, paddingVertical: 10, borderRadius: radii.pill, marginTop: 8 },
+  emptyBtnText: { color: colors.textSoft, fontSize: 13, fontWeight: '800' },
+  searchInputWrap: { flexDirection: 'row', alignItems: 'center', backgroundColor: colors.surfaceElevated, borderRadius: radii.md, paddingHorizontal: 12, height: 44, marginBottom: 12, gap: 8, borderWidth: 1, borderColor: colors.borderSoft },
+  searchInput: { flex: 1, color: colors.text, fontSize: 14 },
   filterScroll: { marginBottom: 10 },
   chipRow: { flexDirection: 'row', gap: 8, paddingRight: 16 },
-  chip: { borderWidth: 1, borderColor: '#333', paddingHorizontal: 12, paddingVertical: 8, borderRadius: 18 },
-  chipActive: { backgroundColor: '#e50914', borderColor: '#e50914' },
-  chipText: { color: '#888', fontSize: 12, fontWeight: '600' },
-  chipTextActive: { color: '#fff' },
+  chip: { borderWidth: 1, borderColor: colors.borderSoft, paddingHorizontal: 12, paddingVertical: 8, borderRadius: radii.pill, backgroundColor: colors.surface },
+  chipActive: { backgroundColor: colors.primary, borderColor: colors.primary },
+  chipText: { color: colors.muted, fontSize: 12, fontWeight: '700' },
+  chipTextActive: { color: colors.text },
   gridRow: { justifyContent: 'space-between', marginBottom: 12 },
-  card: { backgroundColor: '#141426', borderRadius: 12, paddingBottom: 8 },
-  swipeDelete: { width: 92, backgroundColor: '#e50914', borderRadius: 12, marginLeft: 8, marginBottom: 8, alignItems: 'center', justifyContent: 'center', gap: 4 },
-  swipeDeleteText: { color: '#fff', fontSize: 11, fontWeight: '700' },
-  removeBtn: { position: 'absolute', top: 8, right: 8, backgroundColor: '#e50914', borderRadius: 10, width: 22, height: 22, alignItems: 'center', justifyContent: 'center', zIndex: 2 },
-  typeBadge: { position: 'absolute', top: 8, left: 8, backgroundColor: '#1a1a40', borderRadius: 10, paddingHorizontal: 8, paddingVertical: 3, zIndex: 1 },
-  typeBadgeText: { color: '#8888ff', fontSize: 11, fontWeight: '600' },
-  poster: { borderTopLeftRadius: 12, borderTopRightRadius: 12, marginBottom: 7 },
-  posterFallback: { backgroundColor: '#1e1e30', alignItems: 'center', justifyContent: 'center' },
-  cardTitle: { color: '#fff', fontSize: 12, fontWeight: '600', marginBottom: 4, paddingHorizontal: 8 },
+  card: { backgroundColor: colors.surface, borderRadius: radii.md, paddingBottom: 8, borderWidth: 1, borderColor: colors.borderSoft },
+  swipeDelete: { width: 92, backgroundColor: colors.primary, borderRadius: radii.md, marginLeft: 8, marginBottom: 8, alignItems: 'center', justifyContent: 'center', gap: 4 },
+  swipeDeleteText: { color: colors.text, fontSize: 11, fontWeight: '800' },
+  removeBtn: { position: 'absolute', top: 8, right: 8, backgroundColor: colors.primary, borderRadius: radii.pill, width: 22, height: 22, alignItems: 'center', justifyContent: 'center', zIndex: 2 },
+  typeBadge: { position: 'absolute', top: 8, left: 8, backgroundColor: colors.accentSoft, borderRadius: radii.pill, paddingHorizontal: 8, paddingVertical: 3, zIndex: 1, borderWidth: 1, borderColor: colors.whiteGlass },
+  typeBadgeText: { color: colors.text, fontSize: 11, fontWeight: '700' },
+  poster: { borderTopLeftRadius: radii.md, borderTopRightRadius: radii.md, marginBottom: 7, backgroundColor: colors.surfacePressed },
+  posterFallback: { backgroundColor: colors.surfaceElevated, alignItems: 'center', justifyContent: 'center' },
+  cardTitle: { color: colors.text, fontSize: 12, fontWeight: '700', marginBottom: 4, paddingHorizontal: 8 },
   cardMetaRow: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 8 },
-  cardRating: { color: '#aaa', fontSize: 11 },
-  cardYear: { color: '#888', fontSize: 11 },
-  statusPill: { marginTop: 7, marginHorizontal: 8, backgroundColor: '#1e1e40', borderRadius: 12, paddingHorizontal: 8, paddingVertical: 4, alignSelf: 'flex-start' },
-  statusPillText: { color: '#8888ff', fontSize: 10, fontWeight: '700' },
+  cardRating: { color: colors.muted, fontSize: 11 },
+  cardYear: { color: colors.muted2, fontSize: 11 },
+  statusPill: { marginTop: 7, marginHorizontal: 8, backgroundColor: colors.accentSoft, borderRadius: radii.pill, paddingHorizontal: 8, paddingVertical: 4, alignSelf: 'flex-start' },
+  statusPillText: { color: colors.textSoft, fontSize: 10, fontWeight: '800' },
 });
