@@ -249,26 +249,30 @@ function parseGeminiResult(text: string) {
 
 async function askAI(mood: string, signal?: AbortSignal): Promise<GeminiResult> {
   const prompt = buildAiPrompt(mood);
-  try {
-    // Prefer web-capable Gemini when available.
-    const r = await askGemini(prompt, 'gemini-2.5-flash', {
-      signal,
-      googleSearch: true,
-      timeoutMs: 25000,
-      maxOutputTokens: 4000,
-    });
-    return { ...parseGeminiResult(r.text), webSearch: true };
-  } catch (e: any) {
-    if (e?.name === 'AbortError') throw e;
-    // Fallback: try Gemini without grounding, mark webSearch accordingly.
-    const r = await askGemini(prompt, 'gemini-2.5-flash', {
-      signal,
-      googleSearch: false,
-      timeoutMs: 30000,
-      maxOutputTokens: 3000,
-    });
-    return { ...parseGeminiResult(r.text), webSearch: false };
+  // Google Search grounding roughly doubles Gemini's latency, so only pay for it
+  // when the query actually asks for fresh releases. Classic/vibe queries are
+  // answered from the model's own knowledge — much faster and just as good.
+  if (isFreshnessQuery(mood)) {
+    try {
+      const r = await askGemini(prompt, 'gemini-2.5-flash', {
+        signal,
+        googleSearch: true,
+        timeoutMs: 25000,
+        maxOutputTokens: 4000,
+      });
+      return { ...parseGeminiResult(r.text), webSearch: r.groundingUsed };
+    } catch (e: any) {
+      if (e?.name === 'AbortError') throw e;
+      // Grounded call failed — fall through to the offline model below.
+    }
   }
+  const r = await askGemini(prompt, 'gemini-2.5-flash', {
+    signal,
+    googleSearch: false,
+    timeoutMs: 30000,
+    maxOutputTokens: 3000,
+  });
+  return { ...parseGeminiResult(r.text), webSearch: false };
 }
 
 // askGemini is delegated to `utils/gemini.ts`, which calls Gemini's REST API.
@@ -308,6 +312,127 @@ async function searchTitle(title: string, adultContent: boolean, mediaTypeFilter
   // result", which turned AI hallucinations (or near-miss titles) into the
   // wrong real movie. Better to drop a title than to show an unrelated one.
   return results.find((item: any) => isLikelyTitleMatch(title, item)) || null;
+}
+
+// --- Direct TMDB routing -------------------------------------------------
+// Some queries are fully structured ("новинки", a bare genre, "лучшие фильмы")
+// and need no LLM at all. We serve those straight from TMDB /discover — one fast
+// request instead of a slow grounded Gemini call plus N per-title lookups.
+// parseDirectIntent returns null the moment a query carries any free-form intent,
+// so anything nuanced still flows through the AI path.
+
+const MOVIE_GENRE_KEYWORDS: { id: number; re: RegExp }[] = [
+  { id: 28, re: /боевик|экшн|экшен|action/ },
+  { id: 35, re: /комеди|смешн|comedy/ },
+  { id: 18, re: /\bдрам|drama/ },
+  { id: 27, re: /ужас|хоррор|horror/ },
+  { id: 10749, re: /мелодрам|романт|romance/ },
+  { id: 878, re: /фантастик|sci-?fi/ },
+  { id: 53, re: /триллер|thriller/ },
+  { id: 16, re: /анимаци|мультф|мультик|animation/ },
+  { id: 99, re: /документ|documentary/ },
+  { id: 9648, re: /детектив|mystery/ },
+  { id: 14, re: /фэнтези|фэнтэзи|фентези|fantasy/ },
+  { id: 12, re: /приключен|adventure/ },
+  { id: 10751, re: /семейн|family/ },
+  { id: 36, re: /историч|history/ },
+  { id: 10752, re: /военн|\bwar\b/ },
+  { id: 80, re: /криминал|crime|мафи/ },
+  { id: 37, re: /вестерн|western/ },
+];
+
+// Movie genre id → TV genre id where TMDB splits them into separate buckets.
+const MOVIE_TO_TV_GENRE: Record<number, number> = {
+  28: 10759, 12: 10759, 878: 10765, 14: 10765, 10752: 10768,
+};
+
+// Free-form markers the LLM should interpret — their presence disables routing.
+const SEMANTIC_MARKERS = /похож|в стиле|как\s|вайб|настроени|про\s|about|like\s|чтобы|который|где\s/;
+
+const ROUTE_CONNECTORS = new Set([
+  'и', 'а', 'но', 'или', 'со', 'для', 'от', 'до', 'по', 'из', 'во', 'об',
+  'же', 'бы', 'ли', 'это', 'их', 'его', 'ещё', 'еще', 'чтоб', 'там',
+]);
+
+type DirectIntent = { type: 'movie' | 'tv'; params: Record<string, string> };
+
+function parseDirectIntent(query: string, adultContent: boolean): DirectIntent | null {
+  const lower = query.toLowerCase().trim();
+  if (!lower || SEMANTIC_MARKERS.test(lower)) return null;
+
+  const isTv = /сериал|шоу|дорам|сезон/.test(lower);
+  const fresh = isFreshnessQuery(lower);
+  const classic = /класси|ретро|старо|стар(ый|ые|ое)|[789]0-?е|советск|нуар/.test(lower);
+  const topRated = /лучш|\bтоп\b|высок\w*\s*рейтинг|рейтингов|popular|популярн|известн|культов/.test(lower);
+  const genreIds = MOVIE_GENRE_KEYWORDS.filter(g => g.re.test(lower)).map(g => g.id);
+
+  if (!(fresh || classic || topRated || genreIds.length)) return null;
+
+  // Strip every token we recognized. If meaningful words survive, the query is
+  // richer than our structured signals can express → defer to the LLM.
+  let residual = lower
+    .replace(/[«»"“”().,!?:;]/g, ' ')
+    .replace(/\b20[2-9]\d\b/g, ' ')
+    .replace(/[789]0-?е/g, ' ');
+  for (const g of MOVIE_GENRE_KEYWORDS) residual = residual.replace(g.re, ' ');
+  residual = residual
+    .replace(/новинк\w*|новое|новые|новый|свеж\w*|последн\w*|недавн\w*|вышл\w*|recent|latest|\bnew\b|fresh/g, ' ')
+    .replace(/класси\w*|ретро|старо\w*|стар(ый|ые|ое)|советск\w*|нуар/g, ' ')
+    .replace(/лучш\w*|\bтоп\b|высок\w*|рейтинг\w*|popular|популярн\w*|известн\w*|культов\w*/g, ' ')
+    .replace(/фильм\w*|кино|сериал\w*|шоу|дорам\w*|сезон\w*|movies?|films?|shows?|series/g, ' ')
+    .replace(/посмотр\w*|смотр\w*|хочу|покажи|показать|найд\w*|подбер\w*|подборк\w*|watch|want/g, ' ')
+    .replace(/что-?то|нибудь|какой-?нибудь|мне|вечер\w*|сегодня|самы\w*|просто|пожалуйста|good|some/g, ' ')
+    .replace(/хорош\w*|интересн\w*|на\b|\bв\b|\bс\b|\bо\b/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  const leftover = residual.split(' ').filter(t => t.length > 2 && !ROUTE_CONNECTORS.has(t));
+  if (leftover.length > 0) return null;
+
+  const type: 'movie' | 'tv' = isTv ? 'tv' : 'movie';
+  const params: Record<string, string> = {
+    include_adult: String(adultContent),
+    'vote_count.gte': '30',
+  };
+  if (genreIds.length) {
+    const ids = type === 'tv' ? genreIds.map(id => MOVIE_TO_TV_GENRE[id] ?? id) : genreIds;
+    params.with_genres = ids.join(',');
+  }
+
+  const now = new Date();
+  const today = now.toISOString().slice(0, 10);
+  const dateField = type === 'tv' ? 'first_air_date' : 'primary_release_date';
+
+  if (topRated) {
+    params.sort_by = 'vote_average.desc';
+    params['vote_count.gte'] = '300';
+  } else if (fresh) {
+    // "Popular among recent releases" — the most useful reading of "новинки".
+    params.sort_by = 'popularity.desc';
+    params[`${dateField}.gte`] = `${now.getFullYear() - 1}-01-01`;
+    params[`${dateField}.lte`] = today;
+    params['vote_count.gte'] = '10';
+  } else if (classic) {
+    params.sort_by = 'vote_average.desc';
+    params['vote_count.gte'] = '200';
+    params[`${dateField}.lte`] = '2005-12-31';
+  } else {
+    params.sort_by = 'popularity.desc';
+  }
+
+  return { type, params };
+}
+
+async function fetchDirect(intent: DirectIntent, signal?: AbortSignal) {
+  const res = await fetchWithTimeout(
+    tmdbUrls.discover(intent.type, intent.params),
+    { headers: tmdbHeaders(), signal }
+  );
+  const data = await res.json();
+  // /discover results omit media_type; the rest of the screen relies on it.
+  return (data.results || [])
+    .filter((m: any) => m.poster_path)
+    .map((m: any) => ({ ...m, media_type: intent.type }));
 }
 
 export default function MoodScreen({ navigation }: any) {
@@ -521,6 +646,23 @@ export default function MoodScreen({ navigation }: any) {
     resolveCursorRef.current = 0;
 
     try {
+      // Fast path: structured queries (новинки / жанр / "лучшие") come straight
+      // from TMDB /discover — one request, no slow grounded LLM round-trip.
+      const intent = parseDirectIntent(query, adultContent);
+      if (intent) {
+        const items = await fetchDirect(intent, signal);
+        if (signal.aborted) return;
+        if (items.length > 0) {
+          slotsRef.current = items;
+          setResults(items);
+          setTotalTitles(items.length);
+          setProcessed(items.length);
+          setAllResolved(true);
+          return;
+        }
+        // Empty discover (rare) → fall through to the AI path below.
+      }
+
       const aiResult = await askAI(query, signal);
       if (signal.aborted) return;
 

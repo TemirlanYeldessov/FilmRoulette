@@ -3,6 +3,10 @@ import { GEMINI_KEY } from '../constants/api';
 type GeminiResponse = {
   text: string;
   raw?: any;
+  // True when the model actually grounded its answer with a web search (Gemini
+  // returns groundingMetadata only when the search tool fired). Lets callers
+  // tell a real web-backed answer from one served from stale model knowledge.
+  groundingUsed: boolean;
 };
 
 type GeminiOptions = {
@@ -85,5 +89,11 @@ export async function askGemini(
   if (!text) {
     throw new Error('ИИ вернул пустой ответ. Попробуй ещё раз.');
   }
-  return { text, raw: data };
+  const meta = data?.candidates?.[0]?.groundingMetadata;
+  const groundingUsed = !!(
+    meta?.groundingChunks?.length ||
+    meta?.webSearchQueries?.length ||
+    meta?.groundingSupports?.length
+  );
+  return { text, raw: data, groundingUsed };
 }
