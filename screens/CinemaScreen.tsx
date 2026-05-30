@@ -1,8 +1,12 @@
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Linking, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { WebView } from 'react-native-webview';
+
+// kino.kz behind DDoS-Guard can hang without ever firing onLoadEnd/onError,
+// leaving an infinite spinner. Bail to the error state after this long.
+const LOAD_TIMEOUT_MS = 15000;
 
 // kino.kz keeps the selected city in a cookie (city=4 = Aktobe), not the URL.
 // We force it two ways: a Cookie header on the first (SSR) request, and a
@@ -14,15 +18,43 @@ const AKTOBE_COOKIE = 'city=4';
 
 export default function CinemaScreen({ navigation }: any) {
   const webRef = useRef<WebView>(null);
+  const timerRef = useRef<any>(null);
+  // Once the first load finishes, later in-page navigations must not trip the
+  // watchdog — otherwise browsing the site could flip us to the error screen.
+  const loadedRef = useRef(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
   const [canGoBack, setCanGoBack] = useState(false);
 
+  const clearLoadTimer = () => {
+    if (timerRef.current) {
+      clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
+  };
+
+  const armLoadTimer = () => {
+    clearLoadTimer();
+    timerRef.current = setTimeout(() => {
+      if (loadedRef.current) return;
+      setError(true);
+      setLoading(false);
+    }, LOAD_TIMEOUT_MS);
+  };
+
+  // Arm the watchdog for the initial load and clear it on unmount.
+  useEffect(() => {
+    armLoadTimer();
+    return clearLoadTimer;
+  }, []);
+
   const openExternal = () => Linking.openURL(KINO_URL).catch(() => {});
 
   const reload = () => {
+    loadedRef.current = false;
     setError(false);
     setLoading(true);
+    armLoadTimer();
     webRef.current?.reload();
   };
 
@@ -65,9 +97,9 @@ export default function CinemaScreen({ navigation }: any) {
             injectedJavaScriptBeforeContentLoaded={`document.cookie = '${AKTOBE_COOKIE}; path=/'; true;`}
             sharedCookiesEnabled
             thirdPartyCookiesEnabled
-            onLoadStart={() => setError(false)}
-            onLoadEnd={() => setLoading(false)}
-            onError={() => { setError(true); setLoading(false); }}
+            onLoadStart={() => { setError(false); armLoadTimer(); }}
+            onLoadEnd={() => { loadedRef.current = true; setLoading(false); clearLoadTimer(); }}
+            onError={() => { setError(true); setLoading(false); clearLoadTimer(); }}
             onNavigationStateChange={(s) => setCanGoBack(s.canGoBack)}
             style={styles.web}
           />

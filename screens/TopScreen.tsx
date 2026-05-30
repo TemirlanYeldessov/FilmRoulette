@@ -20,7 +20,9 @@ import { MovieCardSkeleton } from '../components/Skeleton';
 import PaginationBar from '../components/PaginationBar';
 import CardMark from '../components/CardMark';
 import { getCached, setCached, LIST_TTL } from '../utils/apiCache';
-import { dedup, itemToMovie } from '../utils/tmdb';
+import { dedup, itemToMovie, sanitizeYearRange, areFiltersEqual, applyDiscoverFilters } from '../utils/tmdb';
+import { makeTmdbFetch } from '../utils/api';
+import { COUNTRIES, LANGUAGES, RATINGS, SORT_OPTIONS } from '../constants/filters';
 import { TMDB_TOKEN as TOKEN } from '../constants/api';
 
 const MEDIA_TABS = [
@@ -43,71 +45,13 @@ const CATEGORY_TABS = {
   ],
 };
 
-const LANGUAGES = [
-  { code: '', name: 'Любой' }, { code: 'ru', name: 'Русский' }, { code: 'en', name: 'Английский' },
-  { code: 'ko', name: 'Корейский' }, { code: 'ja', name: 'Японский' }, { code: 'fr', name: 'Французский' },
-  { code: 'de', name: 'Немецкий' }, { code: 'es', name: 'Испанский' },
-];
-
-const COUNTRIES = [
-  { code: '', name: 'Любая' }, { code: 'US', name: 'США' }, { code: 'GB', name: 'Великобритания' },
-  { code: 'RU', name: 'Россия' }, { code: 'KR', name: 'Корея' }, { code: 'JP', name: 'Япония' },
-  { code: 'FR', name: 'Франция' }, { code: 'DE', name: 'Германия' },
-];
-
-const RATINGS = [0, 5, 6, 7, 8, 9];
-
-const SORT_OPTIONS = [
-  { key: 'popularity.desc', name: 'По популярности' },
-  { key: 'vote_average.desc', name: 'По рейтингу' },
-  { key: 'release_date.desc', name: 'Сначала новые' },
-  { key: 'release_date.asc', name: 'Сначала старые' },
-];
-
 const SKELETON_KEYS = [1, 2, 3, 4, 5, 6];
 const ITEMS_PER_PAGE = 20;
 
-function assertValidTmdbPayload(data: any) {
-  if (data?.success === false || data?.status_code) {
-    throw new Error(data.status_message || 'TMDB error');
-  }
-  return data;
-}
-
-function withCheckedJson(res: Response) {
-  const json = res.json.bind(res);
-  (res as any).json = async () => assertValidTmdbPayload(await json());
-  return res;
-}
-
-function areFiltersEqual(a: any, b: any) {
-  return JSON.stringify(a) === JSON.stringify(b);
-}
-
-async function fetchWithTimeout(url: string, options: any = {}, timeout = 10000) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeout);
-  const externalSignal: AbortSignal | undefined = options.signal;
-  const onExternalAbort = () => controller.abort();
-  if (externalSignal) {
-    if (externalSignal.aborted) controller.abort();
-    else externalSignal.addEventListener('abort', onExternalAbort);
-  }
-  try {
-    const res = await fetch(url, { ...options, signal: controller.signal });
-    if (!res.ok) throw new Error('TMDB временно не отвечает. Попробуй ещё раз.');
-    return withCheckedJson(res);
-  } catch (e: any) {
-    if (e.name === 'AbortError') {
-      if (externalSignal?.aborted) throw e;
-      throw new Error('Превышено время ожидания.');
-    }
-    throw e;
-  } finally {
-    clearTimeout(timer);
-    if (externalSignal) externalSignal.removeEventListener('abort', onExternalAbort);
-  }
-}
+const fetchWithTimeout = makeTmdbFetch({
+  notOk: 'TMDB временно не отвечает. Попробуй ещё раз.',
+  timeout: 'Превышено время ожидания.',
+});
 
 async function fetchItems(mediaType: string, category: string, page: number) {
   const cacheKey = `top:${mediaType}:${category}:${page}`;
@@ -145,11 +89,7 @@ async function discoverWithFilters(mediaType: string, filters: any, adultContent
     language: 'ru-RU', sort_by: filters.sortBy || 'popularity.desc',
     page: String(page), include_adult: String(adultContent),
   };
-  if (filters.minRating > 0) params['vote_average.gte'] = String(filters.minRating);
-  if (filters.language) params.with_original_language = filters.language;
-  if (filters.country) params.with_origin_country = filters.country;
-  if (filters.yearFrom) params[mediaType === 'movie' ? 'primary_release_date.gte' : 'first_air_date.gte'] = `${filters.yearFrom}-01-01`;
-  if (filters.yearTo) params[mediaType === 'movie' ? 'primary_release_date.lte' : 'first_air_date.lte'] = `${filters.yearTo}-12-31`;
+  applyDiscoverFilters(params, filters, mediaType);
   const url = `https://api.themoviedb.org/3/discover/${mediaType}?${new URLSearchParams(params)}`;
   const res = await fetchWithTimeout(url, { headers: { Authorization: `Bearer ${TOKEN}` } });
   const data = await res.json();
@@ -304,12 +244,9 @@ export default function TopScreen({ navigation }: any) {
 
   const applyFilters = async (rawF: any) => {
     const f = { ...rawF };
-    const yf = parseInt(f.yearFrom, 10);
-    const yt = parseInt(f.yearTo, 10);
-    if (Number.isFinite(yf) && Number.isFinite(yt) && yf > yt) {
-      f.yearFrom = String(yt);
-      f.yearTo = String(yf);
-    }
+    const years = sanitizeYearRange(f.yearFrom, f.yearTo);
+    f.yearFrom = years.yearFrom;
+    f.yearTo = years.yearTo;
     setFilters(f);
     activeFiltersRef.current = f;
     setShowFilters(false);

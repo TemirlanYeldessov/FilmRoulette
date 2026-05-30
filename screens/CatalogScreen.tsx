@@ -18,92 +18,14 @@ import {
 } from 'react-native';
 import PaginationBar from '../components/PaginationBar';
 import CardMark from '../components/CardMark';
+import PosterCard from '../components/PosterCard';
 import { getCached, setCached, LIST_TTL } from '../utils/apiCache';
-import { dedup, itemToMovie } from '../utils/tmdb';
+import { dedup, itemToMovie, sanitizeYearRange, areFiltersEqual, applyDiscoverFilters, mapBaseDetail } from '../utils/tmdb';
+import { makeTmdbFetch } from '../utils/api';
+import { MOVIE_GENRES, TV_GENRES, COUNTRIES, LANGUAGES, RATINGS, MAX_RATINGS, SORT_OPTIONS } from '../constants/filters';
 import { HorizontalCardSkeleton, MovieCardSkeleton } from '../components/Skeleton';
 import { useAppContext } from '../store/AppContext';
 import { TMDB_TOKEN as TOKEN } from '../constants/api';
-
-const MOVIE_GENRES = [
-  { id: 0, name: 'Все жанры' },
-  { id: 28, name: 'Боевик' },
-  { id: 12, name: 'Приключения' },
-  { id: 16, name: 'Анимация' },
-  { id: 35, name: 'Комедия' },
-  { id: 80, name: 'Криминал' },
-  { id: 99, name: 'Документальный' },
-  { id: 18, name: 'Драма' },
-  { id: 10751, name: 'Семейный' },
-  { id: 14, name: 'Фэнтези' },
-  { id: 36, name: 'История' },
-  { id: 27, name: 'Ужасы' },
-  { id: 10402, name: 'Музыка' },
-  { id: 9648, name: 'Мистика' },
-  { id: 10749, name: 'Романтика' },
-  { id: 878, name: 'Фантастика' },
-  { id: 10770, name: 'Телефильм' },
-  { id: 53, name: 'Триллер' },
-  { id: 10752, name: 'Военный' },
-  { id: 37, name: 'Вестерн' },
-];
-
-const TV_GENRES = [
-  { id: 0, name: 'Все жанры' },
-  { id: 10759, name: 'Боевик' },
-  { id: 16, name: 'Анимация' },
-  { id: 35, name: 'Комедия' },
-  { id: 80, name: 'Криминал' },
-  { id: 99, name: 'Документальный' },
-  { id: 18, name: 'Драма' },
-  { id: 10751, name: 'Семейный' },
-  { id: 10762, name: 'Детский' },
-  { id: 9648, name: 'Мистика' },
-  { id: 10763, name: 'Новости' },
-  { id: 10764, name: 'Реалити' },
-  { id: 10765, name: 'Фантастика' },
-  { id: 10766, name: 'Мелодрама' },
-  { id: 10767, name: 'Ток-шоу' },
-  { id: 10768, name: 'Война и политика' },
-  { id: 37, name: 'Вестерн' },
-];
-
-const COUNTRIES = [
-  { code: '', name: 'Любая' },
-  { code: 'US', name: 'США' },
-  { code: 'GB', name: 'Великобритания' },
-  { code: 'RU', name: 'Россия' },
-  { code: 'KR', name: 'Корея' },
-  { code: 'JP', name: 'Япония' },
-  { code: 'FR', name: 'Франция' },
-  { code: 'DE', name: 'Германия' },
-  { code: 'IT', name: 'Италия' },
-  { code: 'ES', name: 'Испания' },
-  { code: 'IN', name: 'Индия' },
-  { code: 'CN', name: 'Китай' },
-  { code: 'TR', name: 'Турция' },
-];
-
-const LANGUAGES = [
-  { code: '', name: 'Любой' },
-  { code: 'ru', name: 'Русский' },
-  { code: 'en', name: 'Английский' },
-  { code: 'ko', name: 'Корейский' },
-  { code: 'ja', name: 'Японский' },
-  { code: 'fr', name: 'Французский' },
-  { code: 'de', name: 'Немецкий' },
-  { code: 'es', name: 'Испанский' },
-  { code: 'it', name: 'Итальянский' },
-  { code: 'hi', name: 'Хинди' },
-  { code: 'tr', name: 'Турецкий' },
-  { code: 'zh', name: 'Китайский' },
-];
-
-const SORT_OPTIONS = [
-  { key: 'popularity.desc', name: 'По популярности' },
-  { key: 'vote_average.desc', name: 'По рейтингу' },
-  { key: 'release_date.desc', name: 'Сначала новые' },
-  { key: 'release_date.asc', name: 'Сначала старые' },
-];
 
 const CONTENT_TYPES = [
   { key: 'all', name: 'Фильмы и сериалы' },
@@ -111,8 +33,6 @@ const CONTENT_TYPES = [
   { key: 'tv', name: 'Только сериалы' },
 ];
 
-const RATINGS = [0, 5, 6, 7, 8, 9];
-const MAX_RATINGS = [10, 9, 8, 7, 6, 5];
 const SKELETON_KEYS = [0, 1, 2, 3, 4, 5];
 const TRENDING_PAGE_CAP = 10;
 
@@ -140,47 +60,10 @@ function toggleGenreId(filters: any, id: number) {
 const defaultPreciseFilters = { yearFrom: '', yearTo: '', minRating: 0, maxRating: 10, country: '' };
 const RANDOM_REUSE_NOTICE = 'Все свежие варианты уже видели — показываю повтор.';
 
-function assertValidTmdbPayload(data: any) {
-  if (data?.success === false || data?.status_code) {
-    throw new Error(data.status_message || 'TMDB error');
-  }
-  return data;
-}
-
-function withCheckedJson(res: Response) {
-  const json = res.json.bind(res);
-  (res as any).json = async () => assertValidTmdbPayload(await json());
-  return res;
-}
-
-function areFiltersEqual(a: any, b: any) {
-  return JSON.stringify(a) === JSON.stringify(b);
-}
-
-async function fetchWithTimeout(url: string, options: any = {}, timeout = 10000) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeout);
-  const externalSignal: AbortSignal | undefined = options.signal;
-  const onExternalAbort = () => controller.abort();
-  if (externalSignal) {
-    if (externalSignal.aborted) controller.abort();
-    else externalSignal.addEventListener('abort', onExternalAbort);
-  }
-  try {
-    const res = await fetch(url, { ...options, signal: controller.signal });
-    if (!res.ok) throw new Error('TMDB временно не отвечает. Попробуй еще раз.');
-    return withCheckedJson(res);
-  } catch (e: any) {
-    if (e.name === 'AbortError') {
-      if (externalSignal?.aborted) throw e;
-      throw new Error('Превышено время ожидания.');
-    }
-    throw e;
-  } finally {
-    clearTimeout(timer);
-    if (externalSignal) externalSignal.removeEventListener('abort', onExternalAbort);
-  }
-}
+const fetchWithTimeout = makeTmdbFetch({
+  notOk: 'TMDB временно не отвечает. Попробуй еще раз.',
+  timeout: 'Превышено время ожидания.',
+});
 
 async function fetchDetails(id: number, type: string) {
   const [ruRes, enRes] = await Promise.all([
@@ -193,21 +76,7 @@ async function fetchDetails(id: number, type: string) {
   ]);
   const ruData = await ruRes.json();
   const enData = await enRes.json();
-  const trailerRu = ruData.videos?.results?.find((v: any) => v.type === 'Trailer' && v.site === 'YouTube');
-  const trailerEn = enData.videos?.results?.find((v: any) => v.type === 'Trailer' && v.site === 'YouTube');
-  return {
-    id,
-    titleRu: ruData.title || ruData.name,
-    titleEn: enData.title || enData.name,
-    overview: ruData.overview || enData.overview,
-    poster: ruData.poster_path ? `https://image.tmdb.org/t/p/w500${ruData.poster_path}` : null,
-    trailerKey: trailerRu?.key || trailerEn?.key || null,
-    mediaType: type,
-    rating: ruData.vote_average ? ruData.vote_average.toFixed(1) : null,
-    year: (ruData.release_date || ruData.first_air_date || '').slice(0, 4),
-    country: ruData.production_countries?.[0]?.name || null,
-    genres: ruData.genres?.map((g: any) => g.name).join(', ') || null,
-  };
+  return mapBaseDetail(id, ruData, enData, type);
 }
 
 async function fetchRandom(
@@ -225,11 +94,7 @@ async function fetchRandom(
   };
   const genres = selectedGenres.filter(g => g !== 0);
   if (genres.length > 0) params.with_genres = genres.join(',');
-  if (filters.yearFrom) params[type === 'movie' ? 'primary_release_date.gte' : 'first_air_date.gte'] = `${filters.yearFrom}-01-01`;
-  if (filters.yearTo) params[type === 'movie' ? 'primary_release_date.lte' : 'first_air_date.lte'] = `${filters.yearTo}-12-31`;
-  if (filters.minRating > 0) params['vote_average.gte'] = String(filters.minRating);
-  if (filters.maxRating < 10) params['vote_average.lte'] = String(filters.maxRating);
-  if (filters.country) params.with_origin_country = filters.country;
+  applyDiscoverFilters(params, filters, type);
 
   for (let attempt = 0; attempt < 5; attempt += 1) {
     params.page = String(Math.floor(Math.random() * 20) + 1);
@@ -272,17 +137,23 @@ async function searchItems(query: string, adultContent: boolean, page = 1) {
   };
 }
 
+// Parse a TMDB date to a sortable timestamp; missing/invalid dates become 0 so
+// they sort last (desc) / first (asc) instead of producing NaN comparisons,
+// which leave undated items in an unstable order.
+function dateValue(item: any): number {
+  const t = new Date(item.release_date || item.first_air_date || '').getTime();
+  return Number.isFinite(t) ? t : 0;
+}
+
 function sortMerged(items: any[], sortBy: string): any[] {
   return [...items].sort((a, b) => {
     switch (sortBy) {
       case 'vote_average.desc':
         return (b.vote_average || 0) - (a.vote_average || 0);
       case 'release_date.desc':
-        return new Date(b.release_date || b.first_air_date || '').getTime() -
-               new Date(a.release_date || a.first_air_date || '').getTime();
+        return dateValue(b) - dateValue(a);
       case 'release_date.asc':
-        return new Date(a.release_date || a.first_air_date || '').getTime() -
-               new Date(b.release_date || b.first_air_date || '').getTime();
+        return dateValue(a) - dateValue(b);
       default:
         return (b.popularity || 0) - (a.popularity || 0);
     }
@@ -300,14 +171,7 @@ async function discoverItems(filters: any, adultContent: boolean, page = 1) {
       include_adult: String(adultContent),
     };
     if (filters.genreIds?.length) params.with_genres = filters.genreIds.join(',');
-    if (filters.minRating > 0) params['vote_average.gte'] = String(filters.minRating);
-    if (filters.maxRating < 10) params['vote_average.lte'] = String(filters.maxRating);
-    if (filters.language) params.with_original_language = filters.language;
-    if (filters.country) params.with_origin_country = filters.country;
-    if (filters.yearFrom)
-      params[type === 'movie' ? 'primary_release_date.gte' : 'first_air_date.gte'] = `${filters.yearFrom}-01-01`;
-    if (filters.yearTo)
-      params[type === 'movie' ? 'primary_release_date.lte' : 'first_air_date.lte'] = `${filters.yearTo}-12-31`;
+    applyDiscoverFilters(params, filters, type);
 
     const url = `https://api.themoviedb.org/3/discover/${type}?${new URLSearchParams(params)}`;
     const res = await fetchWithTimeout(url, { headers: { Authorization: `Bearer ${TOKEN}` } });
@@ -672,12 +536,9 @@ export default function CatalogScreen({ navigation }: any) {
     // instead of a confusing empty state.
     const f = { ...rawF };
     if (f.minRating > f.maxRating) f.maxRating = 10;
-    const yf = parseInt(f.yearFrom, 10);
-    const yt = parseInt(f.yearTo, 10);
-    if (Number.isFinite(yf) && Number.isFinite(yt) && yf > yt) {
-      f.yearFrom = String(yt);
-      f.yearTo = String(yf);
-    }
+    const years = sanitizeYearRange(f.yearFrom, f.yearTo);
+    f.yearFrom = years.yearFrom;
+    f.yearTo = years.yearTo;
     const requestId = ++searchRequestRef.current;
     lastQueryRef.current = '';
     activeFiltersRef.current = f;
@@ -738,14 +599,12 @@ export default function CatalogScreen({ navigation }: any) {
   };
 
   const openRandom = async () => {
+    if (loading) return;
     const fp = { ...preciseFilters };
     if (fp.minRating > fp.maxRating) fp.maxRating = 10;
-    const yf = parseInt(fp.yearFrom, 10);
-    const yt = parseInt(fp.yearTo, 10);
-    if (Number.isFinite(yf) && Number.isFinite(yt) && yf > yt) {
-      fp.yearFrom = String(yt);
-      fp.yearTo = String(yf);
-    }
+    const years = sanitizeYearRange(fp.yearFrom, fp.yearTo);
+    fp.yearFrom = years.yearFrom;
+    fp.yearTo = years.yearTo;
     setLoading(true);
     setError('');
     try {
@@ -827,6 +686,11 @@ export default function CatalogScreen({ navigation }: any) {
             <Text style={styles.resultsTitle}>
               {searchQuery.trim() ? 'Результаты поиска' : 'Результаты фильтров'}
             </Text>
+            {!searchQuery.trim() && filters.mediaType === 'all' && filters.sortBy !== 'popularity.desc' && (
+              <Text style={styles.resultsCaption}>
+                В режиме «Фильмы и сериалы» сортировка применяется в пределах страницы
+              </Text>
+            )}
           </View>
 
           {searching ? (
@@ -861,21 +725,9 @@ export default function CatalogScreen({ navigation }: any) {
               contentContainerStyle={styles.grid}
               columnWrapperStyle={styles.row}
               renderItem={({ item }) => (
-                <TouchableOpacity style={[styles.card, { width: cardWidth }]} onPress={() => openCard(item)}>
-                  <View style={styles.typeBadge}>
-                    <Text style={styles.typeBadgeText}>{item.media_type === 'tv' ? 'Сериал' : 'Фильм'}</Text>
-                  </View>
-                  <CardMark movie={itemToMovie(item, mediaType)} />
-                  <Image
-                    source={{ uri: `https://image.tmdb.org/t/p/w300${item.poster_path}` }}
-                    style={[styles.poster, { width: cardWidth, height: cardWidth * 1.5 }]}
-                    contentFit="cover"
-                    transition={200}
-                    cachePolicy="memory-disk"
-                  />
-                  <Text style={styles.cardTitle} numberOfLines={2}>{item.title || item.name}</Text>
+                <PosterCard item={item} cardWidth={cardWidth} onPress={() => openCard(item)} mediaTypeFallback={mediaType}>
                   {item.vote_average > 0 && <Text style={styles.cardRating}>★ {item.vote_average.toFixed(1)}</Text>}
-                </TouchableOpacity>
+                </PosterCard>
               )}
               ListFooterComponent={
                 <PaginationBar
@@ -1084,6 +936,7 @@ const styles = StyleSheet.create({
   resultsBackBtn: { flexDirection: 'row', alignItems: 'center', gap: 4, marginBottom: 8 },
   resultsBackText: { color: '#8888ff', fontSize: 14, fontWeight: '600' },
   resultsTitle: { color: '#fff', fontSize: 18, fontWeight: '700' },
+  resultsCaption: { color: '#666', fontSize: 11, marginTop: 4 },
   scroll: { padding: 16 },
   sectionTitle: { fontSize: 18, fontWeight: '700', color: '#fff', marginBottom: 12, marginTop: 8 },
   sectionSubtitle: { color: '#888', fontSize: 13, marginTop: -6, marginBottom: 14 },
@@ -1108,11 +961,6 @@ const styles = StyleSheet.create({
   randomText: { color: '#fff', fontWeight: '700', fontSize: 16 },
   grid: { padding: 12 },
   row: { justifyContent: 'space-between', marginBottom: 12 },
-  card: {},
-  typeBadge: { position: 'absolute', top: 8, left: 8, backgroundColor: '#1a1a40', borderRadius: 10, paddingHorizontal: 8, paddingVertical: 3, zIndex: 1 },
-  typeBadgeText: { color: '#8888ff', fontSize: 11, fontWeight: '600' },
-  poster: { borderRadius: 10, marginBottom: 6 },
-  cardTitle: { color: '#fff', fontSize: 12, fontWeight: '600', marginBottom: 3 },
   cardRating: { color: '#aaa', fontSize: 11 },
   empty: { flex: 1, alignItems: 'center', paddingTop: 80, paddingHorizontal: 24 },
   emptyText: { color: '#aaa', fontSize: 16, textAlign: 'center', marginTop: 10 },

@@ -1,5 +1,4 @@
 import { Ionicons } from '@expo/vector-icons';
-import { Image } from 'expo-image';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
@@ -21,10 +20,11 @@ import {
   useSpeechRecognitionEvent,
 } from 'expo-speech-recognition';
 import { useAppContext } from '../store/AppContext';
-import CardMark from '../components/CardMark';
+import PosterCard from '../components/PosterCard';
 import { MovieCardSkeleton } from '../components/Skeleton';
 import { itemToMovie } from '../utils/tmdb';
 import { TMDB_TOKEN, GROQ_KEY } from '../constants/api';
+import { makeTmdbFetch } from '../utils/api';
 
 const RESOLVE_CONCURRENCY = 6;
 const SKELETON_KEYS = [0, 1, 2, 3, 4, 5];
@@ -66,43 +66,10 @@ function getRandomSuggestions(count = 6) {
   return [...ALL_SUGGESTIONS].sort(() => Math.random() - 0.5).slice(0, count);
 }
 
-function assertValidTmdbPayload(data: any) {
-  if (data?.success === false || data?.status_code) {
-    throw new Error(data.status_message || 'TMDB error');
-  }
-  return data;
-}
-
-function withCheckedJson(res: Response) {
-  const json = res.json.bind(res);
-  (res as any).json = async () => assertValidTmdbPayload(await json());
-  return res;
-}
-
-async function fetchWithTimeout(url: string, options: any = {}, timeout = 10000) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeout);
-  const externalSignal: AbortSignal | undefined = options.signal;
-  const onExternalAbort = () => controller.abort();
-  if (externalSignal) {
-    if (externalSignal.aborted) controller.abort();
-    else externalSignal.addEventListener('abort', onExternalAbort);
-  }
-  try {
-    const res = await fetch(url, { ...options, signal: controller.signal });
-    if (!res.ok) throw new Error('TMDB временно не отвечает. Попробуй ещё раз.');
-    return withCheckedJson(res);
-  } catch (e: any) {
-    if (e?.name === 'AbortError') {
-      if (externalSignal?.aborted) throw e;
-      throw new Error('Превышено время ожидания. Проверь интернет.');
-    }
-    throw e;
-  } finally {
-    clearTimeout(timer);
-    if (externalSignal) externalSignal.removeEventListener('abort', onExternalAbort);
-  }
-}
+const fetchWithTimeout = makeTmdbFetch({
+  notOk: 'TMDB временно не отвечает. Попробуй ещё раз.',
+  timeout: 'Превышено время ожидания. Проверь интернет.',
+});
 
 // Extract the first complete top-level JSON object from arbitrary text.
 // Tolerates markdown fences, leading prose, and trailing junk by tracking
@@ -136,7 +103,19 @@ function extractJsonObject(raw: string): string | null {
 type GroqResult = {
   mediaTypeFilter: 'movie' | 'tv' | 'mixed';
   titles: string[];
+  // True when the answer came from a web-search-capable model (Compound).
+  // False when we fell back to the offline model, whose knowledge may be stale.
+  webSearch: boolean;
 };
+
+// Rough detector for "freshness" intent (a year or new-release wording). Used
+// only to decide whether to warn the user when the offline fallback ran — so a
+// false positive just shows an extra hint, never blocks anything.
+function isFreshnessQuery(mood: string) {
+  const t = mood.toLowerCase();
+  return /\b20[2-9]\d\b/.test(t) ||
+    /новинк|новое|новые|свеж|последн|недавн|вышл|recent|latest|\bnew\b/.test(t);
+}
 
 function normalizeGroqResult(parsed: any): GroqResult {
   const rawFilter = String(parsed?.mediaTypeFilter ?? '').toLowerCase().trim();
@@ -148,8 +127,23 @@ function normalizeGroqResult(parsed: any): GroqResult {
   if (titles.length === 0) {
     throw new Error('ИИ не вернул ни одного названия. Попробуй переформулировать запрос.');
   }
-  return { mediaTypeFilter, titles };
+  return { mediaTypeFilter, titles, webSearch: false };
 }
+
+function getItemYear(item: any) {
+  const d = item?.release_date || item?.first_air_date || '';
+  const y = parseInt(String(d).slice(0, 4), 10);
+  return Number.isFinite(y) ? y : 0;
+}
+
+const SORT_OPTIONS = [
+  { key: 'relevance', label: 'Релевантность', icon: 'sparkles-outline' },
+  { key: 'rating', label: 'Рейтинг', icon: 'star-outline' },
+  { key: 'year', label: 'Год', icon: 'calendar-outline' },
+  { key: 'popularity', label: 'Популярность', icon: 'flame-outline' },
+] as const;
+
+type SortKey = (typeof SORT_OPTIONS)[number]['key'];
 
 function normalizeTitle(value: string) {
   return value
@@ -191,29 +185,45 @@ function isLikelyTitleMatch(query: string, item: any) {
 }
 
 function buildAiPrompt(mood: string) {
-  return `Ты эксперт по кино и сериалам. Пользователь описал что хочет посмотреть: "${mood}".
+  const now = new Date();
+  const today = now.toISOString().slice(0, 10);
+  const currentYear = now.getFullYear();
+  return `Ты эксперт по кино и сериалам. Сегодня: ${today} (текущий год — ${currentYear}).
+Запрос пользователя: "${mood}".
 
-ВАЖНО: Сначала определи - пользователь явно просит ФИЛЬМ, СЕРИАЛ, или не уточняет.
-- Если в запросе есть слова "фильм", "кино", "movie" → mediaTypeFilter = "movie" (только фильмы)
-- Если в запросе есть слова "сериал", "шоу", "series", "сезон" → mediaTypeFilter = "tv" (только сериалы)
-- Если тип не указан явно → mediaTypeFilter = "mixed" (можно вперемешку)
+Сначала пойми НАМЕРЕНИЕ по смыслу, а не по простому совпадению слов. Учитывай отрицания ("не хочу новое", "только не старьё", "надоели новинки") — они меняют смысл на противоположный. Слова-подсказки ниже — лишь ориентир, а не триггеры.
 
-Подбери как можно больше названий, которые МАКСИМАЛЬНО точно соответствуют запросу — не ограничивай себя искусственно. Ориентир 50-60, но если реально подходящих больше — давай больше; если запрос узкий и хороших мало — лучше меньше, но без воды и случайных тайтлов.
+ШАГ 1 — Тип контента (mediaTypeFilter):
+- Просит фильм/кино/movie → "movie" (только фильмы)
+- Просит сериал/шоу/сезоны/series → "tv" (только сериалы)
+- Тип не важен или не назван → "mixed" (и фильмы, и сериалы)
 
-Критерии:
-- Соблюдай mediaTypeFilter строго
-- Подбирай по атмосфере, вайбу, элементам которые упомянул пользователь
-- Только реально существующие фильмы/сериалы
-- Разнообразие годов; обязательно добавь свежие релизы 2025–2026 (проверь актуальные новинки через веб-поиск, если он доступен)
-- Без повторений, только уникальные названия
+ШАГ 2 — Период:
+- НОВИНКИ — хочет свежее/недавнее или назвал конкретный год (${currentYear}, ${currentYear - 1}…). ОБЯЗАТЕЛЬНО найди реальные релизы ВЕБ-ПОИСКОМ (память может устареть). Включай ТОЛЬКО этот период (назван год — строго он; "новинки" без года — ${currentYear} и конец ${currentYear - 1}). Без старья и без "разнообразия годов". Мало релизов — верни сколько есть.
+- КЛАССИКА/СТАРОЕ — хочет старое/классику/ретро. Признанные старые тайтлы по вайбу; знаковая "современная классика" тоже допустима — классика не обязана быть только очень старой.
+- КОНКРЕТНЫЙ ДИАПАЗОН — назвал десятилетие или промежуток (90-е, 2000-е, "2010–2015"). Только тайтлы из этого диапазона.
+- ЗА ВСЕ ВРЕМЕНА (по умолчанию для общего/вайбового запроса) — и старое, и новое, максимум разнообразия по годам. ОБЯЗАТЕЛЬНО добавь и подходящие по вайбу свежие релизы ${currentYear}/${currentYear - 1} (через веб-поиск, число не ограничивай), чтобы были и новинки, а не только старое.
 
-Ответь ТОЛЬКО в формате JSON без markdown:
+ШАГ 3 — Что подбирать:
+- Назван конкретный фильм/сериал, франшиза/сага, режиссёр или актёр → выдай связанное с ним (части франшизы, фильмографию, близкое по стилю и духу). Это важнее абстрактного вайба.
+- Описан вайб/настроение/жанр/сюжет → подбирай по атмосфере и элементам, что упомянул пользователь.
+
+При конфликте сигналов приоритет у более конкретного и явного условия (явный год важнее общего вайба).
+
+Объём — под запрос: узкий/конкретный (один фильм, франшиза) → несколько точных, не раздувай; широкий → много (ориентир 50-60, можно больше). Релевантность важнее числа.
+
+Правила:
+- Соблюдай mediaTypeFilter и период строго.
+- Только реально существующие тайтлы; сомневаешься, что существует — не включай.
+- Без повторов, только уникальные.
+- Расположи по убыванию релевантности — самые точные совпадения первыми.
+
+Ответь СТРОГО одним JSON-объектом, без markdown и без любого текста до или после него:
 {
   "mediaTypeFilter": "movie" | "tv" | "mixed",
   "titles": ["English Title 1", "English Title 2", ...]
 }
-
-Все названия на английском. Качество и релевантность важнее круглого числа.`;
+Названия — международные английские (под которыми тайтл есть в TMDB/IMDb).`;
 }
 
 // Prefer Groq Compound — an agentic system with built-in web search, so it
@@ -221,10 +231,12 @@ function buildAiPrompt(mood: string) {
 // model if Compound is unavailable, rate-limited, or returns garbled JSON.
 async function askAI(mood: string, signal?: AbortSignal): Promise<GroqResult> {
   try {
-    return await askGroq(mood, signal, 'groq/compound-mini');
+    const r = await askGroq(mood, signal, 'groq/compound-mini');
+    return { ...r, webSearch: true };
   } catch (e: any) {
     if (e?.name === 'AbortError') throw e;
-    return await askGroq(mood, signal, 'llama-3.3-70b-versatile');
+    const r = await askGroq(mood, signal, 'llama-3.3-70b-versatile');
+    return { ...r, webSearch: false };
   }
 }
 
@@ -317,9 +329,10 @@ async function searchTitle(title: string, adultContent: boolean, mediaTypeFilter
     return m.media_type === 'movie' || m.media_type === 'tv';
   });
 
-  return results.find((item: any) => isLikelyTitleMatch(title, item)) ||
-    results.find((item: any) => (item.popularity || 0) >= 5) ||
-    null;
+  // Only accept a genuine title match. Previously we fell back to "any popular
+  // result", which turned AI hallucinations (or near-miss titles) into the
+  // wrong real movie. Better to drop a title than to show an unrelated one.
+  return results.find((item: any) => isLikelyTitleMatch(title, item)) || null;
 }
 
 export default function MoodScreen({ navigation }: any) {
@@ -335,6 +348,24 @@ export default function MoodScreen({ navigation }: any) {
   const [error, setError] = useState('');
   const [processed, setProcessed] = useState(0);
   const [totalTitles, setTotalTitles] = useState(0);
+  const [sortBy, setSortBy] = useState<SortKey>('relevance');
+  // Set when a freshness query had to use the offline fallback (no web search),
+  // so the user knows the "new releases" may be incomplete/stale.
+  const [staleNotice, setStaleNotice] = useState(false);
+
+  // Keep `results` in the AI's relevance order; derive the displayed order so
+  // switching sort never loses the original ranking ('relevance' returns it).
+  // While results are still streaming in, hold the relevance order so cards
+  // don't reshuffle on every arrival (which makes them jump under the finger);
+  // the chosen sort is applied once the batch settles.
+  const sortedResults = useMemo(() => {
+    if (sortBy === 'relevance' || loading) return results;
+    const arr = [...results];
+    if (sortBy === 'rating') arr.sort((a, b) => (b.vote_average || 0) - (a.vote_average || 0));
+    else if (sortBy === 'year') arr.sort((a, b) => getItemYear(b) - getItemYear(a));
+    else if (sortBy === 'popularity') arr.sort((a, b) => (b.popularity || 0) - (a.popularity || 0));
+    return arr;
+  }, [results, sortBy, loading]);
   const restartTimerRef = useRef<any>(null);
   const findAbortRef = useRef<AbortController | null>(null);
   // Synchronous mirror of isListening — the 'end' event from native can fire
@@ -443,10 +474,15 @@ export default function MoodScreen({ navigation }: any) {
     setShowInput(false);
     setProcessed(0);
     setTotalTitles(0);
+    setStaleNotice(false);
 
     try {
       const aiResult = await askAI(text, signal);
       if (signal.aborted) return;
+
+      // Freshness query but the web-search model failed → the offline fallback's
+      // "new releases" can't be trusted. Warn instead of silently showing stale data.
+      setStaleNotice(!aiResult.webSearch && isFreshnessQuery(text));
 
       const titles = aiResult.titles;
       setTotalTitles(titles.length);
@@ -557,6 +593,31 @@ export default function MoodScreen({ navigation }: any) {
           )}
         </View>
 
+        {staleNotice && (
+          <View style={styles.staleNotice}>
+            <Ionicons name="warning-outline" size={15} color="#e0a030" />
+            <Text style={styles.staleNoticeText}>
+              Веб-поиск новинок был недоступен — список мог не попасть в самые свежие релизы. Попробуй «Ещё варианты».
+            </Text>
+          </View>
+        )}
+
+        {results.length > 0 && (
+          <View style={styles.sortBar}>
+            <Text style={styles.sortLabel}>Сортировка:</Text>
+            {SORT_OPTIONS.map(opt => (
+              <TouchableOpacity
+                key={opt.key}
+                style={[styles.sortChip, sortBy === opt.key && styles.sortChipActive]}
+                onPress={() => setSortBy(opt.key)}
+              >
+                <Ionicons name={opt.icon} size={13} color={sortBy === opt.key ? '#fff' : '#8888ff'} />
+                <Text style={[styles.sortChipText, sortBy === opt.key && styles.sortChipTextActive]}>{opt.label}</Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+        )}
+
         {loading && results.length === 0 ? (
           <FlatList
             data={SKELETON_KEYS}
@@ -574,33 +635,43 @@ export default function MoodScreen({ navigation }: any) {
         ) : (
           <View style={{ flex: 1 }}>
             <FlatList
-              data={results}
+              data={sortedResults}
               keyExtractor={(item) => `${item.media_type}-${item.id}`}
               numColumns={2}
               contentContainerStyle={styles.grid}
               columnWrapperStyle={styles.row}
               renderItem={({ item }) => (
-                <TouchableOpacity style={[styles.card, { width: cardWidth }]} onPress={() => openCard(item)}>
-                  <View style={styles.typeBadge}>
-                    <Text style={styles.typeBadgeText}>{item.media_type === 'tv' ? 'Сериал' : 'Фильм'}</Text>
-                  </View>
-                  <CardMark movie={itemToMovie(item)} />
-
-                  <Image
-                    source={{ uri: `https://image.tmdb.org/t/p/w300${item.poster_path}` }}
-                    style={[styles.poster, { width: cardWidth, height: cardWidth * 1.5 }]}
-                    contentFit="cover"
-                    transition={200}
-                    cachePolicy="memory-disk"
-                  />
-
-                  <Text style={styles.cardTitle} numberOfLines={2}>{item.title || item.name}</Text>
-
-                  {item.vote_average > 0 && (
-                    <Text style={styles.cardRating}>★ {item.vote_average.toFixed(1)}</Text>
+                <PosterCard item={item} cardWidth={cardWidth} onPress={() => openCard(item)}>
+                  {(item.vote_average > 0 || getItemYear(item) > 0) && (
+                    <Text style={styles.cardRating}>
+                      {item.vote_average > 0 ? `★ ${item.vote_average.toFixed(1)}` : ''}
+                      {item.vote_average > 0 && getItemYear(item) > 0 ? '  ·  ' : ''}
+                      {getItemYear(item) > 0 ? getItemYear(item) : ''}
+                    </Text>
                   )}
-                </TouchableOpacity>
+                </PosterCard>
               )}
+              ListEmptyComponent={
+                loading ? null : (
+                  <View style={styles.emptyBox}>
+                    <Ionicons name="search-outline" size={38} color="#555" />
+                    <Text style={styles.emptyTitle}>Ничего не нашлось на TMDB</Text>
+                    <Text style={styles.emptyHint}>
+                      ИИ подобрал тайтлы, но их не удалось найти в базе. Попробуй переформулировать запрос.
+                    </Text>
+                    <View style={styles.emptyActions}>
+                      <TouchableOpacity style={styles.emptyBtn} onPress={refine}>
+                        <Ionicons name="create-outline" size={15} color="#8888ff" />
+                        <Text style={styles.emptyBtnText}>Уточнить</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity style={styles.emptyBtn} onPress={() => find(mood)}>
+                        <Ionicons name="refresh" size={15} color="#8888ff" />
+                        <Text style={styles.emptyBtnText}>Ещё варианты</Text>
+                      </TouchableOpacity>
+                    </View>
+                  </View>
+                )
+              }
               ListFooterComponent={
                 loading ? (
                   <View style={styles.streamFooter}>
@@ -722,24 +793,29 @@ const styles = StyleSheet.create({
   resultsHeader: { paddingTop: 60, paddingHorizontal: 20, paddingBottom: 12 },
   backBtn: { flexDirection: 'row', alignItems: 'center', gap: 4, marginBottom: 12 },
   backBtnText: { color: '#8888ff', fontSize: 14 },
-  reasonBox: { backgroundColor: '#1e1e30', borderRadius: 12, padding: 14, marginBottom: 8 },
-  reasonText: { color: '#ccc', fontSize: 14, lineHeight: 20 },
   countText: { color: '#888', fontSize: 12, marginTop: 4 },
   resultActions: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 8 },
   actionBtns: { flexDirection: 'row', gap: 8 },
   actionBtn: { flexDirection: 'row', alignItems: 'center', gap: 5, backgroundColor: '#1e1e40', borderWidth: 1, borderColor: '#3a3a66', paddingHorizontal: 12, paddingVertical: 7, borderRadius: 18 },
   actionBtnText: { color: '#8888ff', fontSize: 12, fontWeight: '600' },
+  staleNotice: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: '#2a2410', borderWidth: 1, borderColor: '#5a4a1a', borderRadius: 12, padding: 12, marginHorizontal: 20, marginBottom: 12 },
+  staleNoticeText: { color: '#e0a030', fontSize: 12, flex: 1, lineHeight: 17 },
+  sortBar: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 8, paddingHorizontal: 20, paddingBottom: 12 },
+  sortLabel: { color: '#888', fontSize: 12, marginRight: 2 },
+  sortChip: { flexDirection: 'row', alignItems: 'center', gap: 5, backgroundColor: '#1e1e30', borderWidth: 1, borderColor: '#333', paddingHorizontal: 12, paddingVertical: 7, borderRadius: 18 },
+  sortChipActive: { backgroundColor: '#e50914', borderColor: '#e50914' },
+  sortChipText: { color: '#8888ff', fontSize: 12, fontWeight: '600' },
+  sortChipTextActive: { color: '#fff' },
+  emptyBox: { alignItems: 'center', paddingTop: 48, paddingHorizontal: 24 },
+  emptyTitle: { color: '#aaa', fontSize: 16, textAlign: 'center', marginTop: 10 },
+  emptyHint: { color: '#555', fontSize: 13, textAlign: 'center', marginTop: 6, lineHeight: 19 },
+  emptyActions: { flexDirection: 'row', gap: 10, marginTop: 16 },
+  emptyBtn: { flexDirection: 'row', alignItems: 'center', gap: 5, backgroundColor: '#1e1e40', borderWidth: 1, borderColor: '#3a3a66', paddingHorizontal: 14, paddingVertical: 9, borderRadius: 18 },
+  emptyBtnText: { color: '#8888ff', fontSize: 13, fontWeight: '600' },
   streamFooter: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, paddingVertical: 18 },
   streamFooterText: { color: '#888', fontSize: 13 },
-  loadingBox: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 16, padding: 40 },
   loadingText: { color: '#aaa', fontSize: 15, textAlign: 'center', lineHeight: 22 },
-  openingOverlay: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(15,15,26,0.6)', alignItems: 'center', justifyContent: 'center' },
   grid: { padding: 12 },
   row: { justifyContent: 'space-between', marginBottom: 12 },
-  card: {},
-  typeBadge: { position: 'absolute', top: 8, left: 8, backgroundColor: '#1a1a40', borderRadius: 10, paddingHorizontal: 8, paddingVertical: 3, zIndex: 1 },
-  typeBadgeText: { color: '#8888ff', fontSize: 11, fontWeight: '600' },
-  poster: { borderRadius: 10, marginBottom: 6 },
-  cardTitle: { color: '#fff', fontSize: 12, fontWeight: '600', marginBottom: 3 },
   cardRating: { color: '#aaa', fontSize: 11 },
 });

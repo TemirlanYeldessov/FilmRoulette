@@ -19,8 +19,9 @@ import {
 import YoutubePlayer from 'react-native-youtube-iframe';
 import { MovieDetailSkeleton } from '../components/Skeleton';
 import { useAppContext, UserMovieStatus } from '../store/AppContext';
-import { dedup, itemToMovie } from '../utils/tmdb';
+import { dedup, itemToMovie, applyDiscoverFilters, mapBaseDetail } from '../utils/tmdb';
 import { TMDB_TOKEN as TOKEN } from '../constants/api';
+import { makeTmdbFetch } from '../utils/api';
 
 const relatedPosterWidth = 104;
 const defaultPreciseFilters = { yearFrom: '', yearTo: '', minRating: 0, maxRating: 10, country: '' };
@@ -55,43 +56,10 @@ const STATUS_OPTIONS: { key: UserMovieStatus; label: string; icon: any }[] = [
   { key: 'disliked', label: 'Не понравилось', icon: 'thumbs-down-outline' },
 ];
 
-function assertValidTmdbPayload(data: any) {
-  if (data?.success === false || data?.status_code) {
-    throw new Error(data.status_message || 'TMDB error');
-  }
-  return data;
-}
-
-function withCheckedJson(res: Response) {
-  const json = res.json.bind(res);
-  (res as any).json = async () => assertValidTmdbPayload(await json());
-  return res;
-}
-
-async function fetchWithTimeout(url: string, options: any = {}, timeout = 10000) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeout);
-  const externalSignal: AbortSignal | undefined = options.signal;
-  const onExternalAbort = () => controller.abort();
-  if (externalSignal) {
-    if (externalSignal.aborted) controller.abort();
-    else externalSignal.addEventListener('abort', onExternalAbort);
-  }
-  try {
-    const res = await fetch(url, { ...options, signal: controller.signal });
-    if (!res.ok) throw new Error('TMDB временно не отвечает. Попробуй еще раз.');
-    return withCheckedJson(res);
-  } catch (e: any) {
-    if (e.name === 'AbortError') {
-      if (externalSignal?.aborted) throw e;
-      throw new Error('Превышено время ожидания. Проверь интернет.');
-    }
-    throw e;
-  } finally {
-    clearTimeout(timer);
-    if (externalSignal) externalSignal.removeEventListener('abort', onExternalAbort);
-  }
-}
+const fetchWithTimeout = makeTmdbFetch({
+  notOk: 'TMDB временно не отвечает. Попробуй еще раз.',
+  timeout: 'Превышено время ожидания. Проверь интернет.',
+});
 
 function getCertification(data: any, type: string) {
   if (type === 'movie') {
@@ -132,8 +100,6 @@ async function fetchFullDetails(id: number, type: string, signal?: AbortSignal) 
 
   const ruData = await ruRes.json();
   const enData = await enRes.json();
-  const trailerRu = ruData.videos?.results?.find((v: any) => v.type === 'Trailer' && v.site === 'YouTube');
-  const trailerEn = enData.videos?.results?.find((v: any) => v.type === 'Trailer' && v.site === 'YouTube');
   const recSource = ruData.recommendations?.results?.length
     ? ruData.recommendations.results
     : ruData.similar?.results;
@@ -141,17 +107,7 @@ async function fetchFullDetails(id: number, type: string, signal?: AbortSignal) 
   const recommendationsTotalPages = ruData.recommendations?.total_pages || 1;
 
   return {
-    id,
-    titleRu: ruData.title || ruData.name,
-    titleEn: enData.title || enData.name,
-    overview: ruData.overview || enData.overview,
-    poster: ruData.poster_path ? `https://image.tmdb.org/t/p/w500${ruData.poster_path}` : null,
-    trailerKey: trailerRu?.key || trailerEn?.key || null,
-    mediaType: type,
-    rating: ruData.vote_average ? ruData.vote_average.toFixed(1) : null,
-    year: (ruData.release_date || ruData.first_air_date || '').slice(0, 4),
-    country: ruData.production_countries?.[0]?.name || null,
-    genres: ruData.genres?.map((g: any) => g.name).join(', ') || null,
+    ...mapBaseDetail(id, ruData, enData, type),
     runtime: type === 'movie' ? ruData.runtime : ruData.episode_run_time?.[0],
     seasons: ruData.number_of_seasons,
     ageRating: getCertification(ruData, type),
@@ -173,7 +129,8 @@ async function fetchRandom(
   mediaType: string,
   adultContent: boolean,
   filters: any,
-  recentRandomIds: string[]
+  recentRandomIds: string[],
+  signal?: AbortSignal
 ) {
   const type = mediaType === 'tv' ? 'tv' : 'movie';
   const params: any = {
@@ -183,17 +140,13 @@ async function fetchRandom(
   };
   const genres = selectedGenres.filter(g => g !== 0);
   if (genres.length > 0) params.with_genres = genres.join(',');
-  if (filters.yearFrom) params[type === 'movie' ? 'primary_release_date.gte' : 'first_air_date.gte'] = `${filters.yearFrom}-01-01`;
-  if (filters.yearTo) params[type === 'movie' ? 'primary_release_date.lte' : 'first_air_date.lte'] = `${filters.yearTo}-12-31`;
-  if (filters.minRating > 0) params['vote_average.gte'] = String(filters.minRating);
-  if (filters.maxRating < 10) params['vote_average.lte'] = String(filters.maxRating);
-  if (filters.country) params.with_origin_country = filters.country;
+  applyDiscoverFilters(params, filters, type);
 
   for (let attempt = 0; attempt < 5; attempt += 1) {
     params.page = String(Math.floor(Math.random() * 20) + 1);
     const res = await fetchWithTimeout(
       `https://api.themoviedb.org/3/discover/${type}?${new URLSearchParams(params)}`,
-      { headers: { Authorization: `Bearer ${TOKEN}` } }
+      { headers: { Authorization: `Bearer ${TOKEN}` }, signal }
     );
     const data = await res.json();
     const posterItems = (data.results || []).filter((m: any) => m.poster_path);
@@ -201,7 +154,7 @@ async function fetchRandom(
     const items = freshItems.length > 0 ? freshItems : (attempt >= 3 ? posterItems : []);
     if (items.length > 0) {
       const item = items[Math.floor(Math.random() * items.length)];
-      const details = await fetchFullDetails(item.id, type);
+      const details = await fetchFullDetails(item.id, type, signal);
       return {
         ...details,
         genreId: genres[0] ?? 0,
@@ -225,6 +178,7 @@ export default function MovieScreen({ route, navigation }: any) {
   const [showOnline, setShowOnline] = useState(false);
   const [showTrailer, setShowTrailer] = useState(false);
   const relatedAbortRef = useRef<AbortController | null>(null);
+  const loadNextAbortRef = useRef<AbortController | null>(null);
   const { width } = useWindowDimensions();
   const videoWidth = Math.max(width - 40, 280);
 
@@ -264,6 +218,7 @@ export default function MovieScreen({ route, navigation }: any) {
   useEffect(() => {
     return () => {
       relatedAbortRef.current?.abort();
+      loadNextAbortRef.current?.abort();
     };
   }, []);
 
@@ -360,22 +315,32 @@ export default function MovieScreen({ route, navigation }: any) {
   };
 
   const loadNext = async () => {
-    if (!canLoadRandom) return;
+    if (!canLoadRandom || loadingNext) return;
+    loadNextAbortRef.current?.abort();
+    const controller = new AbortController();
+    loadNextAbortRef.current = controller;
+    const { signal } = controller;
     setLoadingNext(true);
     setSkeletonVisible(true);
     setError('');
     setRandomNotice('');
     setShowTrailer(false);
     try {
-      const next = await fetchRandom(activeRandomGenres, movie.mediaType, adultContent, activePreciseFilters, recentRandomIds);
+      const next = await fetchRandom(activeRandomGenres, movie.mediaType, adultContent, activePreciseFilters, recentRandomIds, signal);
+      if (signal.aborted) return;
       addRecentRandom(next.id, next.mediaType);
       setMovie(next);
       setRandomNotice(next.randomNotice || '');
     } catch (e: any) {
+      if (e?.name === 'AbortError') return;
       setError(e.message || 'Ошибка загрузки.');
+    } finally {
+      if (loadNextAbortRef.current === controller) loadNextAbortRef.current = null;
+      if (!signal.aborted) {
+        setLoadingNext(false);
+        setSkeletonVisible(false);
+      }
     }
-    setLoadingNext(false);
-    setSkeletonVisible(false);
   };
 
   const openRelated = (item: any) => {
@@ -409,7 +374,11 @@ export default function MovieScreen({ route, navigation }: any) {
           </TouchableOpacity>
           <View style={styles.topActions}>
             {canLoadRandom && (
-              <TouchableOpacity style={[styles.iconBtn, styles.rerollBtn]} onPress={loadNext}>
+              <TouchableOpacity
+                style={[styles.iconBtn, styles.rerollBtn, loadingNext && styles.iconBtnDisabled]}
+                onPress={loadNext}
+                disabled={loadingNext}
+              >
                 <Ionicons name="shuffle" size={20} color="#e50914" />
               </TouchableOpacity>
             )}
@@ -675,6 +644,7 @@ const styles = StyleSheet.create({
   topActions: { flexDirection: 'row', gap: 8 },
   iconBtn: { backgroundColor: '#1e1e30', borderRadius: 12, width: 38, height: 38, alignItems: 'center', justifyContent: 'center' },
   rerollBtn: { borderWidth: 1, borderColor: '#e50914' },
+  iconBtnDisabled: { opacity: 0.4 },
   poster: { width: 220, height: 330, borderRadius: 16, marginBottom: 24 },
   posterFallback: { backgroundColor: '#1e1e30', alignItems: 'center', justifyContent: 'center' },
   title: { fontSize: 20, fontWeight: 'bold', color: '#fff', textAlign: 'center', marginBottom: 12 },

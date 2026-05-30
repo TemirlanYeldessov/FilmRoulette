@@ -12,10 +12,11 @@ import {
   View,
 } from 'react-native';
 import PaginationBar from '../components/PaginationBar';
-import CardMark from '../components/CardMark';
+import PosterCard from '../components/PosterCard';
 import { MovieCardSkeleton } from '../components/Skeleton';
 import { itemToMovie } from '../utils/tmdb';
 import { TMDB_TOKEN } from '../constants/api';
+import { makeTmdbFetch } from '../utils/api';
 
 const PAGE_SIZE = 20;
 const SKELETON_KEYS = [1, 2, 3, 4, 5, 6];
@@ -23,43 +24,10 @@ const SKELETON_KEYS = [1, 2, 3, 4, 5, 6];
 type SortKey = 'popularity' | 'year' | 'rating';
 type TypeFilter = 'all' | 'movie' | 'tv';
 
-function assertValidTmdbPayload(data: any) {
-  if (data?.success === false || data?.status_code) {
-    throw new Error(data.status_message || 'TMDB error');
-  }
-  return data;
-}
-
-function withCheckedJson(res: Response) {
-  const json = res.json.bind(res);
-  (res as any).json = async () => assertValidTmdbPayload(await json());
-  return res;
-}
-
-async function fetchWithTimeout(url: string, options: any = {}, timeout = 10000) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeout);
-  const externalSignal: AbortSignal | undefined = options.signal;
-  const onExternalAbort = () => controller.abort();
-  if (externalSignal) {
-    if (externalSignal.aborted) controller.abort();
-    else externalSignal.addEventListener('abort', onExternalAbort);
-  }
-  try {
-    const res = await fetch(url, { ...options, signal: controller.signal });
-    if (!res.ok) throw new Error('TMDB временно не отвечает.');
-    return withCheckedJson(res);
-  } catch (e: any) {
-    if (e?.name === 'AbortError') {
-      if (externalSignal?.aborted) throw e;
-      throw new Error('Превышено время ожидания. Проверь интернет.');
-    }
-    throw e;
-  } finally {
-    clearTimeout(timer);
-    if (externalSignal) externalSignal.removeEventListener('abort', onExternalAbort);
-  }
-}
+const fetchWithTimeout = makeTmdbFetch({
+  notOk: 'TMDB временно не отвечает.',
+  timeout: 'Превышено время ожидания. Проверь интернет.',
+});
 
 async function fetchPerson(personId: number) {
   const [personRes, creditsRes] = await Promise.all([
@@ -292,19 +260,7 @@ export default function ActorScreen({ route, navigation }: any) {
             />
           }
           renderItem={({ item }) => (
-            <TouchableOpacity style={[styles.card, { width: cardWidth }]} onPress={() => openCard(item)}>
-              <View style={styles.typeBadge}>
-                <Text style={styles.typeBadgeText}>{item.media_type === 'tv' ? 'Сериал' : 'Фильм'}</Text>
-              </View>
-              <CardMark movie={itemToMovie(item)} />
-              <Image
-                source={{ uri: `https://image.tmdb.org/t/p/w300${item.poster_path}` }}
-                style={[styles.poster, { width: cardWidth, height: cardWidth * 1.5 }]}
-                contentFit="cover"
-                transition={200}
-                cachePolicy="memory-disk"
-              />
-              <Text style={styles.cardTitle} numberOfLines={2}>{item.title || item.name}</Text>
+            <PosterCard item={item} cardWidth={cardWidth} onPress={() => openCard(item)}>
               {item.vote_average > 0 && (
                 <Text style={styles.cardRating}>★ {item.vote_average.toFixed(1)}</Text>
               )}
@@ -313,7 +269,7 @@ export default function ActorScreen({ route, navigation }: any) {
                   {(item.release_date || item.first_air_date).slice(0, 4)}
                 </Text>
               )}
-            </TouchableOpacity>
+            </PosterCard>
           )}
         />
       )}
@@ -325,7 +281,6 @@ const styles = StyleSheet.create({
   container: { flex: 1 },
   back: { flexDirection: 'row', alignItems: 'center', gap: 4, paddingTop: 60, paddingHorizontal: 20, paddingBottom: 8 },
   backText: { color: '#aaa', fontSize: 14 },
-  loadingBox: { flex: 1, alignItems: 'center', justifyContent: 'center' },
   header: { alignItems: 'center', paddingHorizontal: 16, paddingBottom: 16 },
   photo: { width: 140, height: 140, borderRadius: 70, marginBottom: 16 },
   photoFallback: { backgroundColor: '#1e1e30', alignItems: 'center', justifyContent: 'center' },
@@ -345,11 +300,6 @@ const styles = StyleSheet.create({
   chipSortTextActive: { color: '#8888ff', fontWeight: '600' },
   grid: { paddingHorizontal: 12, paddingBottom: 32 },
   row: { justifyContent: 'space-between', marginBottom: 12 },
-  card: {},
-  typeBadge: { position: 'absolute', top: 8, left: 8, backgroundColor: '#1a1a40', borderRadius: 10, paddingHorizontal: 8, paddingVertical: 3, zIndex: 1 },
-  typeBadgeText: { color: '#8888ff', fontSize: 11, fontWeight: '600' },
-  poster: { borderRadius: 10, marginBottom: 6 },
-  cardTitle: { color: '#fff', fontSize: 12, fontWeight: '600', marginBottom: 2 },
   cardRating: { color: '#aaa', fontSize: 11 },
   cardYear: { color: '#888', fontSize: 11 },
   empty: { alignItems: 'center', paddingTop: 40 },

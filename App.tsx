@@ -14,6 +14,7 @@ import MovieScreen from './screens/MovieScreen';
 import SettingsScreen from './screens/SettingsScreen';
 import TopScreen from './screens/TopScreen';
 import { AppProvider, useAppContext } from './store/AppContext';
+import ErrorBoundary from './components/ErrorBoundary';
 
 const Tab = createBottomTabNavigator();
 const CatalogStack = createStackNavigator();
@@ -278,11 +279,13 @@ function AppTabs() {
 export default function App() {
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
-      <AppProvider>
-        <NavigationContainer>
-          <AppTabs />
-        </NavigationContainer>
-      </AppProvider>
+      <ErrorBoundary>
+        <AppProvider>
+          <NavigationContainer>
+            <AppTabs />
+          </NavigationContainer>
+        </AppProvider>
+      </ErrorBoundary>
     </GestureHandlerRootView>
   );
 }
