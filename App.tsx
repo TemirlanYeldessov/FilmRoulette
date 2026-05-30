@@ -7,6 +7,7 @@ import { useState } from 'react';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import ActorScreen from './screens/ActorScreen';
 import CatalogScreen from './screens/CatalogScreen';
+import CinemaScreen from './screens/CinemaScreen';
 import FavoritesScreen from './screens/FavoritesScreen';
 import MoodScreen from './screens/MoodScreen';
 import MovieScreen from './screens/MovieScreen';
@@ -27,6 +28,7 @@ function CatalogStackScreen() {
       <CatalogStack.Screen name="CatalogHome" component={CatalogScreen} />
       <CatalogStack.Screen name="Card" component={MovieScreen} />
       <CatalogStack.Screen name="Actor" component={ActorScreen} />
+      <CatalogStack.Screen name="Cinema" component={CinemaScreen} />
     </CatalogStack.Navigator>
   );
 }

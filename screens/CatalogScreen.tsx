@@ -944,6 +944,17 @@ export default function CatalogScreen({ navigation }: any) {
             </TouchableOpacity>
           )}
 
+          <TouchableOpacity style={styles.cinemaCard} onPress={() => navigation.navigate('Cinema')}>
+            <View style={styles.cinemaIcon}>
+              <Ionicons name="film" size={22} color="#fff" />
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.cinemaTitle}>Сейчас в кино · Актобе</Text>
+              <Text style={styles.cinemaSubtitle}>Расписание сеансов на сегодня и завтра</Text>
+            </View>
+            <Ionicons name="chevron-forward" size={18} color="#888" />
+          </TouchableOpacity>
+
           <Text style={[styles.sectionTitle, { marginTop: 28 }]}>Новинки недели</Text>
 
           {trendingLoading ? (
@@ -1084,6 +1095,10 @@ const styles = StyleSheet.create({
   genreChipActive: { backgroundColor: '#e50914', borderColor: '#e50914' },
   genreChipText: { color: '#666', fontSize: 13 },
   genreChipTextActive: { color: '#fff', fontWeight: '600' },
+  cinemaCard: { flexDirection: 'row', alignItems: 'center', gap: 12, backgroundColor: '#1e1e40', borderWidth: 1, borderColor: '#3a3a66', borderRadius: 14, padding: 14, marginTop: 24 },
+  cinemaIcon: { width: 42, height: 42, borderRadius: 12, backgroundColor: '#e50914', alignItems: 'center', justifyContent: 'center' },
+  cinemaTitle: { color: '#fff', fontSize: 15, fontWeight: '700' },
+  cinemaSubtitle: { color: '#9a9ad0', fontSize: 12, marginTop: 2 },
   preciseRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', backgroundColor: '#1e1e30', borderRadius: 14, padding: 16, marginBottom: 12, marginTop: 4 },
   preciseTitle: { color: '#fff', fontSize: 15, fontWeight: '600' },
   preciseSubtitle: { color: '#555', fontSize: 12, marginTop: 2 },
