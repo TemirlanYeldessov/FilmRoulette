@@ -23,7 +23,8 @@ import { useAppContext } from '../store/AppContext';
 import PosterCard from '../components/PosterCard';
 import { MovieCardSkeleton } from '../components/Skeleton';
 import { itemToMovie } from '../utils/tmdb';
-import { GROQ_KEY } from '../constants/api';
+import { GEMINI_KEY } from '../constants/api';
+import { askGemini } from '../utils/gemini';
 import { makeTmdbFetch } from '../utils/api';
 import { tmdbUrls, tmdbHeaders } from '../utils/tmdbApi';
 
@@ -105,7 +106,7 @@ function extractJsonObject(raw: string): string | null {
   return null;
 }
 
-type GroqResult = {
+type GeminiResult = {
   mediaTypeFilter: 'movie' | 'tv' | 'mixed';
   titles: string[];
   // True when the answer came from a web-search-capable model (Compound).
@@ -122,9 +123,9 @@ function isFreshnessQuery(mood: string) {
     /новинк|новое|новые|свеж|последн|недавн|вышл|recent|latest|\bnew\b/.test(t);
 }
 
-function normalizeGroqResult(parsed: any): GroqResult {
+function normalizeGeminiResult(parsed: any): GeminiResult {
   const rawFilter = String(parsed?.mediaTypeFilter ?? '').toLowerCase().trim();
-  const mediaTypeFilter: GroqResult['mediaTypeFilter'] =
+  const mediaTypeFilter: GeminiResult['mediaTypeFilter'] =
     rawFilter === 'movie' || rawFilter === 'tv' ? rawFilter : 'mixed';
   const titles = Array.isArray(parsed?.titles)
     ? parsed.titles.filter((t: any): t is string => typeof t === 'string' && t.trim().length > 0)
@@ -231,96 +232,31 @@ function buildAiPrompt(mood: string) {
 Названия — международные английские (под которыми тайтл есть в TMDB/IMDb).`;
 }
 
-// Prefer Groq Compound — an agentic system with built-in web search, so it
+// Prefer Gemini — an agentic system with built-in web search, so it
 // knows fresh releases the offline model can't. Fall back to the plain Llama
-// model if Compound is unavailable, rate-limited, or returns garbled JSON.
-async function askAI(mood: string, signal?: AbortSignal): Promise<GroqResult> {
+// model if web-capable Gemini is unavailable, rate-limited, or returns garbled JSON.
+async function askAI(mood: string, signal?: AbortSignal): Promise<GeminiResult> {
   try {
-    const r = await askGroq(mood, signal, 'groq/compound-mini');
-    return { ...r, webSearch: true };
+    // Prefer web-capable models when available; primary choice is Gemini.
+    const r = await askGemini(mood, 'gemini-2.5-flash');
+    // askGemini should return an object or text; parse JSON if needed below.
+    const jsonText = extractJsonObject(typeof r === 'string' ? r : (r.text || ''));
+    if (!jsonText) throw new Error('Не удалось распознать ответ ИИ. Попробуй ещё раз.');
+    const parsed = JSON.parse(jsonText);
+    return { ...normalizeGeminiResult(parsed), webSearch: true };
   } catch (e: any) {
     if (e?.name === 'AbortError') throw e;
-    const r = await askGroq(mood, signal, 'llama-3.3-70b-versatile');
-    return { ...r, webSearch: false };
+    // Fallback: try the same Gemini model (may be offline), mark webSearch accordingly.
+    const r = await askGemini(mood, 'gemini-2.5-flash');
+    const jsonText = extractJsonObject(typeof r === 'string' ? r : (r.text || ''));
+    if (!jsonText) throw e;
+    const parsed = JSON.parse(jsonText);
+    return { ...normalizeGeminiResult(parsed), webSearch: false };
   }
 }
 
-async function askGroq(
-  mood: string,
-  signal?: AbortSignal,
-  model = 'llama-3.3-70b-versatile'
-): Promise<GroqResult> {
-  const prompt = buildAiPrompt(mood);
-  // Compound runs a live web search before answering, so give it more time and
-  // token headroom for the extra reasoning that precedes the JSON. Capped at 25s
-  // (down from 40s): compound either answers fairly quickly or stalls, and a
-  // long cap just makes the worst case (compound timeout + llama fallback) drag.
-  const isCompound = model.startsWith('groq/compound');
-  const timeoutMs = isCompound ? 25000 : 30000;
-  // Headroom for a larger, uncapped title list (plus Compound's pre-answer
-  // reasoning), so the JSON isn't truncated mid-array.
-  const maxTokens = isCompound ? 4000 : 3000;
-
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  const onExternalAbort = () => controller.abort();
-  if (signal) {
-    if (signal.aborted) controller.abort();
-    else signal.addEventListener('abort', onExternalAbort);
-  }
-  let res: Response;
-  try {
-    res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${GROQ_KEY}`,
-      },
-      body: JSON.stringify({
-        model,
-        messages: [{ role: 'user', content: prompt }],
-        temperature: 0.5,
-        max_tokens: maxTokens,
-      }),
-      signal: controller.signal,
-    });
-  } catch (e: any) {
-    if (e?.name === 'AbortError') {
-      if (signal?.aborted) throw e;
-      throw new Error('ИИ не отвечает. Проверь интернет.');
-    }
-    throw e;
-  } finally {
-    clearTimeout(timer);
-    if (signal) signal.removeEventListener('abort', onExternalAbort);
-  }
-
-  if (!res.ok) {
-    if (res.status === 429) throw new Error('ИИ перегружен. Попробуй через минуту.');
-    throw new Error('ИИ временно недоступен. Попробуй ещё раз.');
-  }
-
-  const data = await res.json();
-  const text = data.choices?.[0]?.message?.content || '';
-
-  if (!text) {
-    throw new Error('ИИ вернул пустой ответ. Попробуй ещё раз.');
-  }
-
-  const jsonText = extractJsonObject(text);
-  if (!jsonText) {
-    throw new Error('Не удалось распознать ответ ИИ. Попробуй ещё раз.');
-  }
-
-  let parsed: any;
-  try {
-    parsed = JSON.parse(jsonText);
-  } catch {
-    throw new Error('Не удалось распознать ответ ИИ. Попробуй ещё раз.');
-  }
-
-  return normalizeGroqResult(parsed);
-}
+// askGemini is delegated to `utils/gemini.ts` which calls a native bridge
+// implemented with the official SDK (com.google.ai.client.generativeai).
 
 async function searchTitle(title: string, adultContent: boolean, mediaTypeFilter: string, signal?: AbortSignal) {
   const res = await fetchWithTimeout(
@@ -752,7 +688,7 @@ export default function MoodScreen({ navigation }: any) {
 
               <View style={styles.aiBadge}>
                 <Ionicons name="sparkles" size={12} color="#8888ff" />
-                <Text style={styles.aiBadgeText}>Powered by Groq Compound · веб-поиск</Text>
+                <Text style={styles.aiBadgeText}>Powered by Gemini · веб-поиск</Text>
               </View>
 
               <Text style={styles.subtitle}>
