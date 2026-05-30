@@ -27,6 +27,23 @@ const AppContext = createContext<AppContextType>({} as AppContextType);
 
 const keyForMovie = (id: number, mediaType: string) => `${mediaType}-${id}`;
 
+// Bump when the persisted shape changes, and add a branch in migrateStored().
+// Installs from before versioning have no key → treated as version 0.
+const SCHEMA_VERSION = 1;
+
+// One place to transform old persisted data into the current shape on app
+// update, so a format change doesn't silently break or drop user data. No
+// transforms are needed yet (v0 data is already compatible with v1) — when the
+// shape changes, branch on `from` here and reshape the slices before they load.
+function migrateStored(
+  from: number,
+  slices: { watchlist: any[]; userRatings: any; recentRandomIds: string[] },
+) {
+  // Example for the future:
+  // if (from < 2) { slices.watchlist = slices.watchlist.map(/* reshape */); }
+  return slices;
+}
+
 function safeParse<T>(raw: string | null, fallback: T): T {
   if (!raw) return fallback;
   try {
@@ -67,18 +84,25 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     let mounted = true;
     (async () => {
       try {
-        const [adult, w, ratings, recent, onboarding] = await Promise.all([
+        const [adult, w, ratings, recent, onboarding, ver] = await Promise.all([
           AsyncStorage.getItem('adultContent'),
           AsyncStorage.getItem('watchlist'),
           AsyncStorage.getItem('userRatings'),
           AsyncStorage.getItem('recentRandomIds'),
           AsyncStorage.getItem('onboardingSeen'),
+          AsyncStorage.getItem('schemaVersion'),
         ]);
         if (!mounted) return;
+        const fromVersion = parseInt(ver || '0', 10) || 0;
+        const migrated = migrateStored(fromVersion, {
+          watchlist: safeParse<any[]>(w, []).map(toSlimMovie),
+          userRatings: safeParse(ratings, {}),
+          recentRandomIds: safeParse<string[]>(recent, []),
+        });
         if (adult === 'true') setAdultContent(true);
-        setWatchlist(safeParse<any[]>(w, []).map(toSlimMovie));
-        setUserRatingsState(safeParse(ratings, {}));
-        setRecentRandomIds(safeParse(recent, []));
+        setWatchlist(migrated.watchlist);
+        setUserRatingsState(migrated.userRatings);
+        setRecentRandomIds(migrated.recentRandomIds);
         setOnboardingSeen(onboarding === 'true');
         if (mounted) setCanPersist(true);
       } catch {
@@ -117,6 +141,13 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     if (!canPersist) return;
     AsyncStorage.setItem('onboardingSeen', String(onboardingSeen));
   }, [onboardingSeen, canPersist]);
+
+  // Stamp the current schema version once data is safe to persist, so the next
+  // launch knows which migrations (if any) to run.
+  useEffect(() => {
+    if (!canPersist) return;
+    AsyncStorage.setItem('schemaVersion', String(SCHEMA_VERSION));
+  }, [canPersist]);
 
   const toggleAdultContent = () => {
     if (!hydrated) return;

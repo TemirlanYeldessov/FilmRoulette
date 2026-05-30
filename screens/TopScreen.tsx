@@ -22,8 +22,8 @@ import CardMark from '../components/CardMark';
 import { getCached, setCached, LIST_TTL } from '../utils/apiCache';
 import { dedup, itemToMovie, sanitizeYearRange, areFiltersEqual, applyDiscoverFilters } from '../utils/tmdb';
 import { makeTmdbFetch } from '../utils/api';
+import { tmdbUrls, tmdbHeaders } from '../utils/tmdbApi';
 import { COUNTRIES, LANGUAGES, RATINGS, SORT_OPTIONS } from '../constants/filters';
-import { TMDB_TOKEN as TOKEN } from '../constants/api';
 
 const MEDIA_TABS = [
   { key: 'movie', label: 'Фильмы' },
@@ -58,9 +58,9 @@ async function fetchItems(mediaType: string, category: string, page: number) {
   const cached = getCached(cacheKey, LIST_TTL);
   if (cached) return cached;
   const url = category === 'trending'
-    ? `https://api.themoviedb.org/3/trending/${mediaType}/week?language=ru-RU&page=${page}`
-    : `https://api.themoviedb.org/3/${mediaType}/${category}?language=ru-RU&page=${page}`;
-  const res = await fetchWithTimeout(url, { headers: { Authorization: `Bearer ${TOKEN}` } });
+    ? tmdbUrls.trendingWeek(mediaType, page)
+    : tmdbUrls.list(mediaType, category, page);
+  const res = await fetchWithTimeout(url, { headers: tmdbHeaders() });
   const data = await res.json();
   const result = {
     results: dedup((data.results || []).filter((m: any) => m.poster_path), mediaType),
@@ -73,8 +73,8 @@ async function fetchItems(mediaType: string, category: string, page: number) {
 
 async function searchItems(query: string, mediaType: string, adultContent: boolean, page = 1) {
   const res = await fetchWithTimeout(
-    `https://api.themoviedb.org/3/search/${mediaType}?query=${encodeURIComponent(query)}&language=ru-RU&include_adult=${adultContent}&page=${page}`,
-    { headers: { Authorization: `Bearer ${TOKEN}` } }
+    tmdbUrls.searchTyped(mediaType, query, adultContent, page),
+    { headers: tmdbHeaders() }
   );
   const data = await res.json();
   return {
@@ -90,8 +90,7 @@ async function discoverWithFilters(mediaType: string, filters: any, adultContent
     page: String(page), include_adult: String(adultContent),
   };
   applyDiscoverFilters(params, filters, mediaType);
-  const url = `https://api.themoviedb.org/3/discover/${mediaType}?${new URLSearchParams(params)}`;
-  const res = await fetchWithTimeout(url, { headers: { Authorization: `Bearer ${TOKEN}` } });
+  const res = await fetchWithTimeout(tmdbUrls.discover(mediaType, params), { headers: tmdbHeaders() });
   const data = await res.json();
   return {
     results: dedup((data.results || []).filter((m: any) => m.poster_path).map((m: any) => ({ ...m, media_type: mediaType })), mediaType),

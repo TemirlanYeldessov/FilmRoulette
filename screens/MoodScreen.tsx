@@ -23,10 +23,15 @@ import { useAppContext } from '../store/AppContext';
 import PosterCard from '../components/PosterCard';
 import { MovieCardSkeleton } from '../components/Skeleton';
 import { itemToMovie } from '../utils/tmdb';
-import { TMDB_TOKEN, GROQ_KEY } from '../constants/api';
+import { GROQ_KEY } from '../constants/api';
 import { makeTmdbFetch } from '../utils/api';
+import { tmdbUrls, tmdbHeaders } from '../utils/tmdbApi';
 
 const RESOLVE_CONCURRENCY = 6;
+// How many AI titles to resolve against TMDB per page. The first page fills the
+// initial screen; the rest resolve on scroll so a 50-title pick doesn't fire 50
+// TMDB searches up front when the user may only look at the first few.
+const RESOLVE_BATCH = 12;
 const SKELETON_KEYS = [0, 1, 2, 3, 4, 5];
 
 const ALL_SUGGESTIONS = [
@@ -247,9 +252,11 @@ async function askGroq(
 ): Promise<GroqResult> {
   const prompt = buildAiPrompt(mood);
   // Compound runs a live web search before answering, so give it more time and
-  // token headroom for the extra reasoning that precedes the JSON.
+  // token headroom for the extra reasoning that precedes the JSON. Capped at 25s
+  // (down from 40s): compound either answers fairly quickly or stalls, and a
+  // long cap just makes the worst case (compound timeout + llama fallback) drag.
   const isCompound = model.startsWith('groq/compound');
-  const timeoutMs = isCompound ? 40000 : 30000;
+  const timeoutMs = isCompound ? 25000 : 30000;
   // Headroom for a larger, uncapped title list (plus Compound's pre-answer
   // reasoning), so the JSON isn't truncated mid-array.
   const maxTokens = isCompound ? 4000 : 3000;
@@ -317,8 +324,8 @@ async function askGroq(
 
 async function searchTitle(title: string, adultContent: boolean, mediaTypeFilter: string, signal?: AbortSignal) {
   const res = await fetchWithTimeout(
-    `https://api.themoviedb.org/3/search/multi?query=${encodeURIComponent(title)}&language=ru-RU&include_adult=${adultContent}`,
-    { headers: { Authorization: `Bearer ${TMDB_TOKEN}` }, signal }
+    tmdbUrls.searchMulti(title, adultContent),
+    { headers: tmdbHeaders(), signal }
   );
   const data = await res.json();
 
@@ -352,6 +359,13 @@ export default function MoodScreen({ navigation }: any) {
   // Set when a freshness query had to use the offline fallback (no web search),
   // so the user knows the "new releases" may be incomplete/stale.
   const [staleNotice, setStaleNotice] = useState(false);
+  // Lazy TMDB resolution of the AI's title list (see RESOLVE_BATCH).
+  const [resolvingMore, setResolvingMore] = useState(false);
+  const [allResolved, setAllResolved] = useState(false);
+  const aiTitlesRef = useRef<string[]>([]);
+  const aiFilterRef = useRef<string>('mixed');
+  const slotsRef = useRef<(any | null)[]>([]);
+  const resolveCursorRef = useRef(0);
 
   // Keep `results` in the AI's relevance order; derive the displayed order so
   // switching sort never loses the original ranking ('relevance' returns it).
@@ -458,6 +472,56 @@ export default function MoodScreen({ navigation }: any) {
     ExpoSpeechRecognitionModule.stop();
   };
 
+  // Rebuild a deduped, gap-free list from the resolved slots. Shared by the
+  // initial resolve and scroll-driven batches so they refresh results the same way.
+  const rebuildResults = () => {
+    const seen = new Set<string>();
+    const out: any[] = [];
+    for (const it of slotsRef.current) {
+      if (!it) continue;
+      const key = `${it.id}-${it.media_type}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(it);
+    }
+    return out;
+  };
+
+  // Resolve the next window of AI titles against TMDB (RESOLVE_BATCH at a time),
+  // streaming results in the AI's order as each resolves.
+  const resolveNextBatch = async (signal: AbortSignal) => {
+    const titles = aiTitlesRef.current;
+    const start = resolveCursorRef.current;
+    if (start >= titles.length) { setAllResolved(true); return; }
+    const end = Math.min(start + RESOLVE_BATCH, titles.length);
+    resolveCursorRef.current = end;
+
+    let cursor = start;
+    const worker = async () => {
+      while (!signal.aborted) {
+        const i = cursor++;
+        if (i >= end) return;
+        try {
+          slotsRef.current[i] = await searchTitle(titles[i], adultContent, aiFilterRef.current, signal) || null;
+        } catch (e: any) {
+          if (e?.name === 'AbortError') return;
+          slotsRef.current[i] = null; // one bad title shouldn't kill the batch
+        }
+        if (!signal.aborted) {
+          setProcessed(p => p + 1);
+          setResults(rebuildResults());
+        }
+      }
+    };
+
+    await Promise.all(
+      Array.from({ length: Math.min(RESOLVE_CONCURRENCY, end - start) }, worker)
+    );
+    if (signal.aborted) return;
+    setResults(rebuildResults());
+    if (resolveCursorRef.current >= titles.length) setAllResolved(true);
+  };
+
   const find = async (text: string) => {
     if (!text.trim()) return;
 
@@ -475,6 +539,10 @@ export default function MoodScreen({ navigation }: any) {
     setProcessed(0);
     setTotalTitles(0);
     setStaleNotice(false);
+    setResolvingMore(false);
+    setAllResolved(false);
+    slotsRef.current = [];
+    resolveCursorRef.current = 0;
 
     try {
       const aiResult = await askAI(text, signal);
@@ -484,61 +552,41 @@ export default function MoodScreen({ navigation }: any) {
       // "new releases" can't be trusted. Warn instead of silently showing stale data.
       setStaleNotice(!aiResult.webSearch && isFreshnessQuery(text));
 
-      const titles = aiResult.titles;
-      setTotalTitles(titles.length);
+      aiTitlesRef.current = aiResult.titles;
+      aiFilterRef.current = aiResult.mediaTypeFilter;
+      slotsRef.current = new Array(aiResult.titles.length).fill(undefined);
+      setTotalTitles(aiResult.titles.length);
 
-      // Keep the AI's ranking: each title resolves into a fixed slot, then we
-      // rebuild a deduped, gap-free list on every completion so results stream
-      // in order as they arrive instead of after the whole batch finishes.
-      const slots: (any | null)[] = new Array(titles.length).fill(undefined);
-      const rebuild = () => {
-        const seen = new Set<string>();
-        const out: any[] = [];
-        for (const it of slots) {
-          if (!it) continue;
-          const key = `${it.id}-${it.media_type}`;
-          if (seen.has(key)) continue;
-          seen.add(key);
-          out.push(it);
-        }
-        return out;
-      };
-
-      let cursor = 0;
-      let done = 0;
-      const worker = async () => {
-        while (!signal.aborted) {
-          const i = cursor++;
-          if (i >= titles.length) return;
-          try {
-            const item = await searchTitle(titles[i], adultContent, aiResult.mediaTypeFilter, signal);
-            slots[i] = item || null;
-          } catch (e: any) {
-            if (e?.name === 'AbortError') return;
-            slots[i] = null; // one bad title shouldn't kill the batch
-          }
-          done += 1;
-          if (!signal.aborted) {
-            setProcessed(done);
-            setResults(rebuild());
-          }
-        }
-      };
-
-      await Promise.all(
-        Array.from({ length: Math.min(RESOLVE_CONCURRENCY, titles.length) }, worker)
-      );
-
-      if (signal.aborted) return;
-      setResults(rebuild());
+      // Resolve the first page now; the rest stream in on scroll. Keep going if
+      // an early page yields nothing on TMDB, so the empty state stays honest
+      // (don't claim "nothing found" while later titles are still unresolved).
+      await resolveNextBatch(signal);
+      while (!signal.aborted && rebuildResults().length === 0 && resolveCursorRef.current < aiTitlesRef.current.length) {
+        await resolveNextBatch(signal);
+      }
     } catch (e: any) {
       if (e?.name === 'AbortError') return;
       console.error(e);
       setError(e?.message || 'Не удалось получить подборку. Попробуй ещё раз.');
       setShowInput(true);
     } finally {
-      if (findAbortRef.current === controller) findAbortRef.current = null;
+      // findAbortRef is intentionally NOT cleared here — scroll-driven batches
+      // reuse this signal until the next search / reset / refine aborts it.
       if (!signal.aborted) setLoading(false);
+    }
+  };
+
+  // Resolve the next page when the grid nears its end.
+  const loadMoreResults = async () => {
+    if (loading || resolvingMore || allResolved) return;
+    const controller = findAbortRef.current;
+    if (!controller || controller.signal.aborted) return;
+    if (resolveCursorRef.current >= aiTitlesRef.current.length) { setAllResolved(true); return; }
+    setResolvingMore(true);
+    try {
+      await resolveNextBatch(controller.signal);
+    } finally {
+      if (!controller.signal.aborted) setResolvingMore(false);
     }
   };
 
@@ -554,6 +602,8 @@ export default function MoodScreen({ navigation }: any) {
     setResults([]);
     setMood('');
     setError('');
+    setResolvingMore(false);
+    setAllResolved(false);
   };
 
   // Back to the input but keep the typed query, so the user can tweak it.
@@ -640,6 +690,8 @@ export default function MoodScreen({ navigation }: any) {
               numColumns={2}
               contentContainerStyle={styles.grid}
               columnWrapperStyle={styles.row}
+              onEndReached={loadMoreResults}
+              onEndReachedThreshold={0.5}
               renderItem={({ item }) => (
                 <PosterCard item={item} cardWidth={cardWidth} onPress={() => openCard(item)}>
                   {(item.vote_average > 0 || getItemYear(item) > 0) && (
@@ -673,7 +725,7 @@ export default function MoodScreen({ navigation }: any) {
                 )
               }
               ListFooterComponent={
-                loading ? (
+                (loading || resolvingMore) ? (
                   <View style={styles.streamFooter}>
                     <ActivityIndicator size="small" color="#e50914" />
                     <Text style={styles.streamFooterText}>Ищу ещё…</Text>

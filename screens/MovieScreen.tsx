@@ -19,11 +19,13 @@ import {
 import YoutubePlayer from 'react-native-youtube-iframe';
 import { MovieDetailSkeleton } from '../components/Skeleton';
 import { useAppContext, UserMovieStatus } from '../store/AppContext';
-import { dedup, itemToMovie, applyDiscoverFilters, mapBaseDetail } from '../utils/tmdb';
-import { TMDB_TOKEN as TOKEN } from '../constants/api';
+import { dedup, itemToMovie, mapBaseDetail } from '../utils/tmdb';
 import { makeTmdbFetch } from '../utils/api';
+import { getCached, setCached } from '../utils/apiCache';
+import { tmdbUrls, tmdbHeaders, pickRandomDiscoverItem } from '../utils/tmdbApi';
 
 const relatedPosterWidth = 104;
+const DETAIL_TTL = 10 * 60 * 1000;
 const defaultPreciseFilters = { yearFrom: '', yearTo: '', minRating: 0, maxRating: 10, country: '' };
 const RANDOM_REUSE_NOTICE = 'Все свежие варианты уже видели — показываю повтор.';
 
@@ -87,15 +89,21 @@ function normalizeRelated(items: any[], type: string) {
 }
 
 async function fetchFullDetails(id: number, type: string, signal?: AbortSignal) {
+  // Details barely change, so cache them briefly: revisiting a title (back /
+  // forward, reroll repeats, "Похожие" round-trips) then reuses this instead of
+  // firing the ru+en pair again. genreId/randomNotice are added by callers via
+  // spread, so the cached base object is never mutated.
+  const cacheKey = `detail:${type}:${id}`;
+  const cached = getCached(cacheKey, DETAIL_TTL);
+  if (cached) return cached;
+
   const extra = type === 'movie' ? 'release_dates' : 'content_ratings';
   const [ruRes, enRes] = await Promise.all([
     fetchWithTimeout(
-      `https://api.themoviedb.org/3/${type}/${id}?language=ru-RU&append_to_response=credits,external_ids,watch/providers,recommendations,similar,videos,${extra}`,
-      { headers: { Authorization: `Bearer ${TOKEN}` }, signal }
+      tmdbUrls.detail(type, id, 'ru-RU', `credits,external_ids,watch/providers,recommendations,similar,videos,${extra}`),
+      { headers: tmdbHeaders(), signal }
     ),
-    fetchWithTimeout(`https://api.themoviedb.org/3/${type}/${id}?language=en-US&append_to_response=videos`, {
-      headers: { Authorization: `Bearer ${TOKEN}` }, signal,
-    }),
+    fetchWithTimeout(tmdbUrls.detail(type, id, 'en-US', 'videos'), { headers: tmdbHeaders(), signal }),
   ]);
 
   const ruData = await ruRes.json();
@@ -106,7 +114,7 @@ async function fetchFullDetails(id: number, type: string, signal?: AbortSignal) 
   const recommendations = normalizeRelated(recSource, type);
   const recommendationsTotalPages = ruData.recommendations?.total_pages || 1;
 
-  return {
+  const result = {
     ...mapBaseDetail(id, ruData, enData, type),
     runtime: type === 'movie' ? ruData.runtime : ruData.episode_run_time?.[0],
     seasons: ruData.number_of_seasons,
@@ -122,6 +130,8 @@ async function fetchFullDetails(id: number, type: string, signal?: AbortSignal) 
     imdbId: ruData.external_ids?.imdb_id || null,
     genreId: null,
   };
+  setCached(cacheKey, result);
+  return result;
 }
 
 async function fetchRandom(
@@ -133,39 +143,19 @@ async function fetchRandom(
   signal?: AbortSignal
 ) {
   const type = mediaType === 'tv' ? 'tv' : 'movie';
-  const params: any = {
-    sort_by: 'popularity.desc',
-    language: 'ru-RU',
-    include_adult: String(adultContent),
+  const picked = await pickRandomDiscoverItem(fetchWithTimeout, {
+    type, selectedGenres, adultContent, filters, recentRandomIds, signal,
+  });
+  if (!picked) throw new Error('Все свежие варианты уже попадались. Попробуй другой жанр или фильтр.');
+  const details = await fetchFullDetails(picked.item.id, type, signal);
+  return {
+    ...details,
+    genreId: picked.genres[0] ?? 0,
+    selectedGenres: picked.genres,
+    preciseFilters: filters,
+    mediaType,
+    randomNotice: picked.reused ? RANDOM_REUSE_NOTICE : null,
   };
-  const genres = selectedGenres.filter(g => g !== 0);
-  if (genres.length > 0) params.with_genres = genres.join(',');
-  applyDiscoverFilters(params, filters, type);
-
-  for (let attempt = 0; attempt < 5; attempt += 1) {
-    params.page = String(Math.floor(Math.random() * 20) + 1);
-    const res = await fetchWithTimeout(
-      `https://api.themoviedb.org/3/discover/${type}?${new URLSearchParams(params)}`,
-      { headers: { Authorization: `Bearer ${TOKEN}` }, signal }
-    );
-    const data = await res.json();
-    const posterItems = (data.results || []).filter((m: any) => m.poster_path);
-    const freshItems = posterItems.filter((m: any) => !recentRandomIds.includes(`${type}-${m.id}`));
-    const items = freshItems.length > 0 ? freshItems : (attempt >= 3 ? posterItems : []);
-    if (items.length > 0) {
-      const item = items[Math.floor(Math.random() * items.length)];
-      const details = await fetchFullDetails(item.id, type, signal);
-      return {
-        ...details,
-        genreId: genres[0] ?? 0,
-        selectedGenres: genres,
-        preciseFilters: filters,
-        mediaType,
-        randomNotice: freshItems.length === 0 ? RANDOM_REUSE_NOTICE : null,
-      };
-    }
-  }
-  throw new Error('Все свежие варианты уже попадались. Попробуй другой жанр или фильтр.');
 }
 
 export default function MovieScreen({ route, navigation }: any) {
@@ -257,8 +247,8 @@ export default function MovieScreen({ route, navigation }: any) {
     try {
       const nextPage = relatedPage + 1;
       const res = await fetchWithTimeout(
-        `https://api.themoviedb.org/3/${movie.mediaType}/${movie.id}/recommendations?language=ru-RU&page=${nextPage}`,
-        { headers: { Authorization: `Bearer ${TOKEN}` }, signal: controller.signal }
+        tmdbUrls.recommendations(movie.mediaType, movie.id, nextPage),
+        { headers: tmdbHeaders(), signal: controller.signal }
       );
       const data = await res.json();
       if (controller.signal.aborted) return;

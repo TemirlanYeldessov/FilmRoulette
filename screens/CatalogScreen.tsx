@@ -25,7 +25,7 @@ import { makeTmdbFetch } from '../utils/api';
 import { MOVIE_GENRES, TV_GENRES, COUNTRIES, LANGUAGES, RATINGS, MAX_RATINGS, SORT_OPTIONS } from '../constants/filters';
 import { HorizontalCardSkeleton, MovieCardSkeleton } from '../components/Skeleton';
 import { useAppContext } from '../store/AppContext';
-import { TMDB_TOKEN as TOKEN } from '../constants/api';
+import { tmdbUrls, tmdbHeaders, pickRandomDiscoverItem } from '../utils/tmdbApi';
 
 const CONTENT_TYPES = [
   { key: 'all', name: 'Фильмы и сериалы' },
@@ -67,12 +67,8 @@ const fetchWithTimeout = makeTmdbFetch({
 
 async function fetchDetails(id: number, type: string) {
   const [ruRes, enRes] = await Promise.all([
-    fetchWithTimeout(`https://api.themoviedb.org/3/${type}/${id}?language=ru-RU&append_to_response=videos`, {
-      headers: { Authorization: `Bearer ${TOKEN}` },
-    }),
-    fetchWithTimeout(`https://api.themoviedb.org/3/${type}/${id}?language=en-US&append_to_response=videos`, {
-      headers: { Authorization: `Bearer ${TOKEN}` },
-    }),
+    fetchWithTimeout(tmdbUrls.detail(type, id, 'ru-RU', 'videos'), { headers: tmdbHeaders() }),
+    fetchWithTimeout(tmdbUrls.detail(type, id, 'en-US', 'videos'), { headers: tmdbHeaders() }),
   ]);
   const ruData = await ruRes.json();
   const enData = await enRes.json();
@@ -87,42 +83,24 @@ async function fetchRandom(
   recentRandomIds: string[]
 ) {
   const type = mediaType;
-  const params: any = {
-    sort_by: 'popularity.desc',
-    language: 'ru-RU',
-    include_adult: String(adultContent),
+  const picked = await pickRandomDiscoverItem(fetchWithTimeout, {
+    type, selectedGenres, adultContent, filters, recentRandomIds,
+  });
+  if (!picked) throw new Error('Новых вариантов по этим условиям не осталось. Попробуй изменить фильтры.');
+  const details = await fetchDetails(picked.item.id, type);
+  return {
+    ...details,
+    genreId: picked.genres[0] ?? 0,
+    selectedGenres: picked.genres,
+    preciseFilters: filters,
+    randomNotice: picked.reused ? RANDOM_REUSE_NOTICE : null,
   };
-  const genres = selectedGenres.filter(g => g !== 0);
-  if (genres.length > 0) params.with_genres = genres.join(',');
-  applyDiscoverFilters(params, filters, type);
-
-  for (let attempt = 0; attempt < 5; attempt += 1) {
-    params.page = String(Math.floor(Math.random() * 20) + 1);
-    const url = `https://api.themoviedb.org/3/discover/${type}?${new URLSearchParams(params)}`;
-    const res = await fetchWithTimeout(url, { headers: { Authorization: `Bearer ${TOKEN}` } });
-    const data = await res.json();
-    const posterItems = (data.results || []).filter((m: any) => m.poster_path);
-    const freshItems = posterItems.filter((m: any) => !recentRandomIds.includes(`${type}-${m.id}`));
-    const items = freshItems.length > 0 ? freshItems : (attempt >= 3 ? posterItems : []);
-    if (items.length > 0) {
-      const item = items[Math.floor(Math.random() * items.length)];
-      const details = await fetchDetails(item.id, type);
-      return {
-        ...details,
-        genreId: genres[0] ?? 0,
-        selectedGenres: genres,
-        preciseFilters: filters,
-        randomNotice: freshItems.length === 0 ? RANDOM_REUSE_NOTICE : null,
-      };
-    }
-  }
-  throw new Error('Новых вариантов по этим условиям не осталось. Попробуй изменить фильтры.');
 }
 
 async function searchItems(query: string, adultContent: boolean, page = 1) {
   const res = await fetchWithTimeout(
-    `https://api.themoviedb.org/3/search/multi?query=${encodeURIComponent(query)}&language=ru-RU&include_adult=${adultContent}&page=${page}`,
-    { headers: { Authorization: `Bearer ${TOKEN}` } }
+    tmdbUrls.searchMulti(query, adultContent, page),
+    { headers: tmdbHeaders() }
   );
   const data = await res.json();
   const results = dedup(
@@ -173,8 +151,7 @@ async function discoverItems(filters: any, adultContent: boolean, page = 1) {
     if (filters.genreIds?.length) params.with_genres = filters.genreIds.join(',');
     applyDiscoverFilters(params, filters, type);
 
-    const url = `https://api.themoviedb.org/3/discover/${type}?${new URLSearchParams(params)}`;
-    const res = await fetchWithTimeout(url, { headers: { Authorization: `Bearer ${TOKEN}` } });
+    const res = await fetchWithTimeout(tmdbUrls.discover(type, params), { headers: tmdbHeaders() });
     const data = await res.json();
     return {
       results: (data.results || []).filter((m: any) => m.poster_path).map((m: any) => ({ ...m, media_type: type })),
@@ -423,10 +400,7 @@ export default function CatalogScreen({ navigation }: any) {
       const cacheKey = `trend:${mt}:${page}`;
       let payload = getCached<{ results: any[]; totalPages: number }>(cacheKey, LIST_TTL);
       if (!payload) {
-        const res = await fetchWithTimeout(
-          `https://api.themoviedb.org/3/trending/${mt}/week?language=ru-RU&page=${page}`,
-          { headers: { Authorization: `Bearer ${TOKEN}` } }
-        );
+        const res = await fetchWithTimeout(tmdbUrls.trendingWeek(mt, page), { headers: tmdbHeaders() });
         const data = await res.json();
         payload = {
           results: (data.results || []).filter((m: any) => m.poster_path),

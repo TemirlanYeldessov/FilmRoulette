@@ -15,8 +15,8 @@ import PaginationBar from '../components/PaginationBar';
 import PosterCard from '../components/PosterCard';
 import { MovieCardSkeleton } from '../components/Skeleton';
 import { itemToMovie } from '../utils/tmdb';
-import { TMDB_TOKEN } from '../constants/api';
 import { makeTmdbFetch } from '../utils/api';
+import { tmdbUrls, tmdbHeaders } from '../utils/tmdbApi';
 
 const PAGE_SIZE = 20;
 const SKELETON_KEYS = [1, 2, 3, 4, 5, 6];
@@ -31,12 +31,8 @@ const fetchWithTimeout = makeTmdbFetch({
 
 async function fetchPerson(personId: number) {
   const [personRes, creditsRes] = await Promise.all([
-    fetchWithTimeout(`https://api.themoviedb.org/3/person/${personId}?language=ru-RU`, {
-      headers: { Authorization: `Bearer ${TMDB_TOKEN}` },
-    }),
-    fetchWithTimeout(`https://api.themoviedb.org/3/person/${personId}/combined_credits?language=ru-RU`, {
-      headers: { Authorization: `Bearer ${TMDB_TOKEN}` },
-    }),
+    fetchWithTimeout(tmdbUrls.person(personId), { headers: tmdbHeaders() }),
+    fetchWithTimeout(tmdbUrls.personCredits(personId), { headers: tmdbHeaders() }),
   ]);
   const person = await personRes.json();
   const credits = await creditsRes.json();
