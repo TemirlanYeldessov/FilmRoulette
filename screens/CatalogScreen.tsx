@@ -803,8 +803,8 @@ export default function CatalogScreen({ navigation }: any) {
               <Ionicons name="film" size={22} color={colors.text} />
             </View>
             <View style={{ flex: 1 }}>
-              <Text style={styles.cinemaTitle}>Сейчас в кино · Актобе</Text>
-              <Text style={styles.cinemaSubtitle}>Расписание сеансов на сегодня и завтра</Text>
+              <Text style={styles.cinemaTitle}>Сейчас в кино</Text>
+              <Text style={styles.cinemaSubtitle}>Актобе и Оренбург · расписание сеансов</Text>
             </View>
             <Ionicons name="chevron-forward" size={18} color={colors.muted} />
           </TouchableOpacity>
