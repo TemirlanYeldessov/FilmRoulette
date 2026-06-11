@@ -5,6 +5,7 @@ import { createStackNavigator } from '@react-navigation/stack';
 import { Modal, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { useState } from 'react';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
+import { SafeAreaProvider } from 'react-native-safe-area-context';
 import ActorScreen from './screens/ActorScreen';
 import CatalogScreen from './screens/CatalogScreen';
 import CinemaScreen from './screens/CinemaScreen';
@@ -15,6 +16,7 @@ import SettingsScreen from './screens/SettingsScreen';
 import TopScreen from './screens/TopScreen';
 import { AppProvider, useAppContext } from './store/AppContext';
 import ErrorBoundary from './components/ErrorBoundary';
+import OfflineBanner from './components/OfflineBanner';
 import { colors, radii, shadow } from './constants/theme';
 
 const Tab = createBottomTabNavigator();
@@ -258,13 +260,16 @@ function AppTabs() {
 export default function App() {
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
-      <ErrorBoundary>
-        <AppProvider>
-          <NavigationContainer>
-            <AppTabs />
-          </NavigationContainer>
-        </AppProvider>
-      </ErrorBoundary>
+      <SafeAreaProvider>
+        <ErrorBoundary>
+          <AppProvider>
+            <NavigationContainer>
+              <AppTabs />
+            </NavigationContainer>
+            <OfflineBanner />
+          </AppProvider>
+        </ErrorBoundary>
+      </SafeAreaProvider>
     </GestureHandlerRootView>
   );
 }

@@ -1,5 +1,5 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { createContext, useContext, useEffect, useState } from 'react';
+import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import type { MediaItem, UserMovieStatus } from '../types/media';
 
 export type { UserMovieStatus } from '../types/media';
@@ -152,12 +152,21 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     AsyncStorage.setItem('schemaVersion', String(SCHEMA_VERSION));
   }, [canPersist]);
 
-  const toggleAdultContent = () => {
+  // O(1) membership lookups for grids/cards. isInWatchlist / isRecentlyRandom
+  // run once per rendered card, so the old linear array scans were O(cards ×
+  // collection) on every grid paint. Derived sets make each lookup constant.
+  const watchlistKeys = useMemo(
+    () => new Set(watchlist.map(m => keyForMovie(m.id, m.mediaType))),
+    [watchlist],
+  );
+  const recentRandomSet = useMemo(() => new Set(recentRandomIds), [recentRandomIds]);
+
+  const toggleAdultContent = useCallback(() => {
     if (!hydrated) return;
     setAdultContent(prev => !prev);
-  };
+  }, [hydrated]);
 
-  const addToWatchlist = (movie: any) => {
+  const addToWatchlist = useCallback((movie: any) => {
     if (!hydrated) return;
     // Strip heavy nested fields (recommendations, cast, providers, etc.) — the
     // detail screen re-fetches them on open. Keeping only what the watchlist
@@ -167,9 +176,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       if (prev.some(m => m.id === slim.id && m.mediaType === slim.mediaType)) return prev;
       return [...prev, slim];
     });
-  };
+  }, [hydrated]);
 
-  const removeFromWatchlist = (id: number, mediaType: string) => {
+  const removeFromWatchlist = useCallback((id: number, mediaType: string) => {
     if (!hydrated) return;
     setWatchlist(prev => prev.filter(m => !(m.id === id && m.mediaType === mediaType)));
     // Drop the rating too, so it doesn't linger orphaned in storage and keep
@@ -181,100 +190,106 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       delete next[key];
       return next;
     });
-  };
+  }, [hydrated]);
 
-  const isInWatchlist = (id: number, mediaType: string) => {
-    return watchlist.some(m => m.id === id && m.mediaType === mediaType);
-  };
+  const isInWatchlist = useCallback(
+    (id: number, mediaType: string) => watchlistKeys.has(keyForMovie(id, mediaType)),
+    [watchlistKeys],
+  );
 
   // Rating a title also saves it to the collection, so the Favorites tab and
   // its status filters reflect everything the user has graded — not just the
   // titles they explicitly hearted.
-  const setUserStatus = (movie: any, status: UserMovieStatus) => {
+  const setUserStatus = useCallback((movie: any, status: UserMovieStatus) => {
     if (!hydrated) return;
     setUserRatingsState(prev => ({ ...prev, [keyForMovie(movie.id, movie.mediaType)]: status }));
     const slim = toSlimMovie(movie);
     setWatchlist(prev =>
       prev.some(m => m.id === slim.id && m.mediaType === slim.mediaType) ? prev : [...prev, slim]
     );
-  };
+  }, [hydrated]);
 
-  const clearUserStatus = (id: number, mediaType: string) => {
+  const clearUserStatus = useCallback((id: number, mediaType: string) => {
     if (!hydrated) return;
     setUserRatingsState(prev => {
       const next = { ...prev };
       delete next[keyForMovie(id, mediaType)];
       return next;
     });
-  };
+  }, [hydrated]);
 
-  const getUserStatus = (id: number, mediaType: string) => {
-    return userRatings[keyForMovie(id, mediaType)] || null;
-  };
+  const getUserStatus = useCallback(
+    (id: number, mediaType: string) => userRatings[keyForMovie(id, mediaType)] || null,
+    [userRatings],
+  );
 
-  const addRecentRandom = (id: number, mediaType: string) => {
+  const addRecentRandom = useCallback((id: number, mediaType: string) => {
     if (!hydrated) return;
     setRecentRandomIds(prev => {
       const movieKey = keyForMovie(id, mediaType);
       return [movieKey, ...prev.filter(k => k !== movieKey)].slice(0, 200);
     });
-  };
+  }, [hydrated]);
 
-  const clearRecentRandom = () => {
+  const clearRecentRandom = useCallback(() => {
     if (!hydrated) return;
     setRecentRandomIds([]);
-  };
+  }, [hydrated]);
 
-  const isRecentlyRandom = (id: number, mediaType: string) => {
-    return recentRandomIds.includes(keyForMovie(id, mediaType));
-  };
+  const isRecentlyRandom = useCallback(
+    (id: number, mediaType: string) => recentRandomSet.has(keyForMovie(id, mediaType)),
+    [recentRandomSet],
+  );
 
-  const markOnboardingSeen = () => {
+  const markOnboardingSeen = useCallback(() => {
     if (!hydrated) return;
     setOnboardingSeen(true);
-  };
+  }, [hydrated]);
 
   // Wipe the whole collection and every grade in one go. Ratings are cleared
   // alongside the watchlist so no orphaned "seen" marks linger on grids.
-  const clearWatchlist = () => {
+  const clearWatchlist = useCallback(() => {
     if (!hydrated) return;
     setWatchlist([]);
     setUserRatingsState({});
-  };
+  }, [hydrated]);
 
   // Let the user replay the intro from Settings.
-  const resetOnboarding = () => {
+  const resetOnboarding = useCallback(() => {
     if (!hydrated) return;
     setOnboardingSeen(false);
-  };
+  }, [hydrated]);
 
-  return (
-    <AppContext.Provider
-      value={{
-        hydrated,
-        adultContent,
-        toggleAdultContent,
-        watchlist,
-        addToWatchlist,
-        removeFromWatchlist,
-        isInWatchlist,
-        userRatings,
-        setUserStatus,
-        clearUserStatus,
-        getUserStatus,
-        recentRandomIds,
-        addRecentRandom,
-        clearRecentRandom,
-        isRecentlyRandom,
-        onboardingSeen,
-        markOnboardingSeen,
-        clearWatchlist,
-        resetOnboarding,
-      }}
-    >
-      {children}
-    </AppContext.Provider>
-  );
+  // Memoize the context value so consumers don't all re-render on every provider
+  // render — only when a slice they read actually changes.
+  const value = useMemo<AppContextType>(() => ({
+    hydrated,
+    adultContent,
+    toggleAdultContent,
+    watchlist,
+    addToWatchlist,
+    removeFromWatchlist,
+    isInWatchlist,
+    userRatings,
+    setUserStatus,
+    clearUserStatus,
+    getUserStatus,
+    recentRandomIds,
+    addRecentRandom,
+    clearRecentRandom,
+    isRecentlyRandom,
+    onboardingSeen,
+    markOnboardingSeen,
+    clearWatchlist,
+    resetOnboarding,
+  }), [
+    hydrated, adultContent, toggleAdultContent, watchlist, addToWatchlist,
+    removeFromWatchlist, isInWatchlist, userRatings, setUserStatus, clearUserStatus,
+    getUserStatus, recentRandomIds, addRecentRandom, clearRecentRandom, isRecentlyRandom,
+    onboardingSeen, markOnboardingSeen, clearWatchlist, resetOnboarding,
+  ]);
+
+  return <AppContext.Provider value={value}>{children}</AppContext.Provider>;
 }
 
 export const useAppContext = () => useContext(AppContext);

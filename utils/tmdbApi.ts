@@ -41,12 +41,24 @@ export const tmdbUrls = {
   personCredits: (id: number) => `${BASE}/person/${id}/combined_credits?language=ru-RU`,
 };
 
+// TMDB /discover never returns more than 500 pages, but the useful pool for a
+// roulette is the first ~20 (popularity-sorted). We cap random paging there.
+const MAX_RANDOM_PAGE = 20;
+const MAX_RANDOM_ATTEMPTS = 6;
+
 // Shared roulette core: pick a random not-recently-seen title via Discover.
 // Both detail screens use this; they differ only in the detail fetcher, the
 // "nothing left" wording and the assembled result shape, which stay at the call
 // site. `fetcher` is the screen's bound fetchWithTimeout (preserves its error
-// wording). Returns null after 5 tries so the caller can throw its own message.
-// `reused` is true when only already-seen titles remained (drives the reroll notice).
+// wording). Returns null after several tries so the caller can throw its own
+// message. `reused` is true when only already-seen titles remained (drives the
+// reroll notice).
+//
+// Paging is bounded by the query's real total_pages, learned from the first
+// response: with narrow filters (country + genre + years) discover may have
+// only 1-2 pages, so a blind random page in 1..20 would land on empty pages and
+// falsely report "nothing left". We start optimistic, clamp once we know the
+// real count, and skip empty pages instead of counting them as exhaustion.
 export async function pickRandomDiscoverItem(
   fetcher: (url: string, options?: any) => Promise<Response>,
   opts: {
@@ -68,14 +80,27 @@ export async function pickRandomDiscoverItem(
   if (genres.length > 0) params.with_genres = genres.join(',');
   applyDiscoverFilters(params, filters, type);
 
-  for (let attempt = 0; attempt < 5; attempt += 1) {
-    params.page = String(Math.floor(Math.random() * 20) + 1);
+  const recent = new Set(recentRandomIds);
+  let pageCap = MAX_RANDOM_PAGE; // optimistic until the first response tells us
+
+  for (let attempt = 0; attempt < MAX_RANDOM_ATTEMPTS; attempt += 1) {
+    params.page = String(Math.floor(Math.random() * pageCap) + 1);
     const res = await fetcher(tmdbUrls.discover(type, params), { headers: tmdbHeaders(), signal });
     const data = await res.json();
+
+    // Clamp future paging to the query's real page count (capped at 20).
+    if (data.total_pages) pageCap = Math.min(Math.max(data.total_pages, 1), MAX_RANDOM_PAGE);
+
     const posterItems = (data.results || []).filter((m: any) => m.poster_path);
-    const freshItems = posterItems.filter((m: any) => !recentRandomIds.includes(`${type}-${m.id}`));
-    // After a few tries with no fresh hits, accept a repeat rather than fail.
-    const items = freshItems.length > 0 ? freshItems : (attempt >= 3 ? posterItems : []);
+    // Empty page (we paged past the real range before learning pageCap) — retry
+    // without burning the "accept a repeat" budget.
+    if (posterItems.length === 0) continue;
+
+    const freshItems = posterItems.filter((m: any) => !recent.has(`${type}-${m.id}`));
+    // Near the end of our attempts, accept an already-seen title rather than fail.
+    const items = freshItems.length > 0
+      ? freshItems
+      : (attempt >= MAX_RANDOM_ATTEMPTS - 2 ? posterItems : []);
     if (items.length > 0) {
       const item = items[Math.floor(Math.random() * items.length)];
       return { item, reused: freshItems.length === 0, genres };

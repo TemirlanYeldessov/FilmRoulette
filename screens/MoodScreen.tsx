@@ -22,7 +22,16 @@ import { useAppContext } from '../store/AppContext';
 import PosterCard from '../components/PosterCard';
 import { MovieCardSkeleton } from '../components/Skeleton';
 import { itemToMovie } from '../utils/tmdb';
-import { askGemini } from '../utils/gemini';
+import {
+  askAI,
+  parseDirectIntent,
+  isFreshnessQuery,
+  isLikelyTitleMatch,
+  friendlyAiError,
+  type AiTitle,
+  type DirectIntent,
+} from '../utils/aiSearch';
+import { logError } from '../utils/logger';
 import { makeTmdbFetch } from '../utils/api';
 import { tmdbUrls, tmdbHeaders } from '../utils/tmdbApi';
 import { useGridColumns } from '../utils/useGridColumns';
@@ -34,6 +43,10 @@ const RESOLVE_CONCURRENCY = 6;
 // initial screen; the rest resolve on scroll so a 50-title pick doesn't fire 50
 // TMDB searches up front when the user may only look at the first few.
 const RESOLVE_BATCH = 12;
+// Coalesce streaming result updates to at most one per this interval. Workers
+// resolve titles faster than the grid needs to repaint; without this each batch
+// fired up to RESOLVE_BATCH full-list setStates, janking the grid on slow phones.
+const RESULTS_FLUSH_MS = 250;
 const SKELETON_KEYS = [0, 1, 2, 3, 4, 5];
 
 const ALL_SUGGESTIONS = [
@@ -78,65 +91,6 @@ const fetchWithTimeout = makeTmdbFetch({
   timeout: 'Превышено время ожидания. Проверь интернет.',
 });
 
-// Extract the first complete top-level JSON object from arbitrary text.
-// Tolerates markdown fences, leading prose, and trailing junk by tracking
-// brace depth and skipping characters inside string literals.
-function extractJsonObject(raw: string): string | null {
-  const stripped = raw.replace(/```(?:json)?\s*([\s\S]*?)```/i, '$1');
-  const text = stripped.trim();
-  const start = text.indexOf('{');
-  if (start === -1) return null;
-  let depth = 0;
-  let inString = false;
-  let escape = false;
-  for (let i = start; i < text.length; i += 1) {
-    const ch = text[i];
-    if (inString) {
-      if (escape) escape = false;
-      else if (ch === '\\') escape = true;
-      else if (ch === '"') inString = false;
-      continue;
-    }
-    if (ch === '"') { inString = true; continue; }
-    if (ch === '{') depth += 1;
-    else if (ch === '}') {
-      depth -= 1;
-      if (depth === 0) return text.slice(start, i + 1);
-    }
-  }
-  return null;
-}
-
-type GeminiResult = {
-  mediaTypeFilter: 'movie' | 'tv' | 'mixed';
-  titles: string[];
-  // True when the answer came from a web-search-capable model (Compound).
-  // False when we fell back to the offline model, whose knowledge may be stale.
-  webSearch: boolean;
-};
-
-// Rough detector for "freshness" intent (a year or new-release wording). Used
-// only to decide whether to warn the user when the offline fallback ran — so a
-// false positive just shows an extra hint, never blocks anything.
-function isFreshnessQuery(mood: string) {
-  const t = mood.toLowerCase();
-  return /\b20[2-9]\d\b/.test(t) ||
-    /новинк|новое|новые|свеж|последн|недавн|вышл|recent|latest|\bnew\b/.test(t);
-}
-
-function normalizeGeminiResult(parsed: any): GeminiResult {
-  const rawFilter = String(parsed?.mediaTypeFilter ?? '').toLowerCase().trim();
-  const mediaTypeFilter: GeminiResult['mediaTypeFilter'] =
-    rawFilter === 'movie' || rawFilter === 'tv' ? rawFilter : 'mixed';
-  const titles = Array.isArray(parsed?.titles)
-    ? parsed.titles.filter((t: any): t is string => typeof t === 'string' && t.trim().length > 0)
-    : [];
-  if (titles.length === 0) {
-    throw new Error('ИИ не вернул ни одного названия. Попробуй переформулировать запрос.');
-  }
-  return { mediaTypeFilter, titles, webSearch: false };
-}
-
 function getItemYear(item: any) {
   const d = item?.release_date || item?.first_air_date || '';
   const y = parseInt(String(d).slice(0, 4), 10);
@@ -161,142 +115,19 @@ const QUICK_REFINES = [
   { label: 'Популярнее', suffix: 'Сделай подборку из более известных и популярных тайтлов.' },
 ] as const;
 
-function normalizeTitle(value: string) {
-  return value
-    .toLowerCase()
-    .normalize('NFKD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .replace(/[^a-z0-9а-яё]+/gi, '');
-}
-
-function levenshtein(a: string, b: string) {
-  if (a === b) return 0;
-  if (!a.length) return b.length;
-  if (!b.length) return a.length;
-  const prev = Array.from({ length: b.length + 1 }, (_, i) => i);
-  const curr = Array(b.length + 1).fill(0);
-  for (let i = 1; i <= a.length; i += 1) {
-    curr[0] = i;
-    for (let j = 1; j <= b.length; j += 1) {
-      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
-      curr[j] = Math.min(curr[j - 1] + 1, prev[j] + 1, prev[j - 1] + cost);
-    }
-    for (let j = 0; j <= b.length; j += 1) prev[j] = curr[j];
-  }
-  return prev[b.length];
-}
-
-function isLikelyTitleMatch(query: string, item: any) {
-  const normalizedQuery = normalizeTitle(query);
-  const candidates = [item.title, item.name, item.original_title, item.original_name]
-    .filter(Boolean)
-    .map((title: string) => normalizeTitle(title));
-  if (!normalizedQuery || candidates.length === 0) return false;
-  return candidates.some((candidate: string) => {
-    if (!candidate) return false;
-    return candidate.includes(normalizedQuery) ||
-      normalizedQuery.includes(candidate) ||
-      levenshtein(candidate, normalizedQuery) <= 3;
-  });
-}
-
-function buildAiPrompt(mood: string) {
-  const now = new Date();
-  const today = now.toISOString().slice(0, 10);
-  const currentYear = now.getFullYear();
-
-  return `Ты — эксперт по кино и сериалам. Отвечай только списком реальных фильмов/сериалов, которые можно найти в TMDB или IMDb.
-
-Сегодня: ${today}. Текущий год: ${currentYear}.
-Запрос пользователя: "${mood}"
-
-Проанализируй запрос по шагам:
-
-1. Тип контента, поле mediaTypeFilter:
-- "movie" — если пользователь явно просит фильм/кино.
-- "tv" — если явно просит сериал/шоу/дораму/аниме-сериал.
-- "mixed" — если тип не указан или подходят и фильмы, и сериалы.
-
-2. Временное намерение:
-- Новинки / fresh / latest / "вышло недавно" / конкретный свежий год (${currentYear}, ${currentYear - 1}) → используй доступный Google Search и возвращай только ${currentYear} и конец ${currentYear - 1}. Если релизов мало, верни сколько есть, не добавляй старое для количества.
-- Классика / ретро / старое / 90-е / 80-е / советское / кино детства → возвращай только тайтлы из запрошенной эпохи или явно старые/классические тайтлы.
-- По вайбу / похоже на X / в стиле X / like X → возвращай релевантный микс разных лет; если есть подходящие свежие релизы, включи их тоже.
-- Если запрос смешивает свежесть и вайб, например "новое по вайбу Интерстеллара", приоритет у свежести.
-- Учитывай отрицания: "не хочу новое" означает не подбирать новинки; "только не старьё" означает избегать старых тайтлов.
-
-3. Правила выдачи:
-- Только реально существующие тайтлы; если не уверен, не включай.
-- Названия только на английском, как в TMDB/IMDb.
-- Без повторов.
-- Сначала самые релевантные.
-- Верни 8-60 тайтлов: узкий запрос — меньше, широкий запрос — больше.
-
-Ответь строго одним JSON-объектом без markdown и без текста до или после него:
-{
-  "mediaTypeFilter": "mixed",
-  "titles": ["English Title 1", "English Title 2"]
-}`;
-}
-// Prefer Gemini with Google Search grounding for fresh releases. If the search
-// tool fails, retry the same prompt without grounding so the feature still works.
-function parseGeminiResult(text: string) {
-  const jsonText = extractJsonObject(text);
-  if (!jsonText) {
-    throw new Error('Не удалось распознать ответ ИИ. Попробуй ещё раз.');
-  }
-  return normalizeGeminiResult(JSON.parse(jsonText));
-}
-
-async function askAI(mood: string, signal?: AbortSignal): Promise<GeminiResult> {
-  const prompt = buildAiPrompt(mood);
-  // Google Search grounding roughly doubles Gemini's latency, so only pay for it
-  // when the query actually asks for fresh releases. Classic/vibe queries are
-  // answered from the model's own knowledge — much faster and just as good.
-  if (isFreshnessQuery(mood)) {
-    try {
-      const r = await askGemini(prompt, 'gemini-2.5-flash', {
-        signal,
-        googleSearch: true,
-        timeoutMs: 25000,
-        maxOutputTokens: 4000,
-      });
-      return { ...parseGeminiResult(r.text), webSearch: r.groundingUsed };
-    } catch (e: any) {
-      if (e?.name === 'AbortError') throw e;
-      // Grounded call failed — fall through to the offline model below.
-    }
-  }
-  const r = await askGemini(prompt, 'gemini-2.5-flash', {
-    signal,
-    googleSearch: false,
-    timeoutMs: 30000,
-    maxOutputTokens: 3000,
-  });
-  return { ...parseGeminiResult(r.text), webSearch: false };
-}
-
-// askGemini is delegated to `utils/gemini.ts`, which calls Gemini's REST API.
-
-function friendlyAiError(e: any) {
-  const message = String(e?.message || '');
-  if (/429|перегруж|quota|rate/i.test(message)) {
-    return 'ИИ сейчас перегружен. Попробуй ещё раз через минуту.';
-  }
-  if (/Gemini API error|API key|403|401/i.test(message)) {
-    return 'ИИ-подбор временно недоступен. Проверь ключ Gemini и попробуй ещё раз.';
-  }
-  if (/network|fetch|internet|не отвечает|timeout|ожид/i.test(message)) {
-    return 'Не получилось связаться с ИИ. Проверь интернет и попробуй снова.';
-  }
-  if (/JSON|распознать|пустой ответ|названия/i.test(message)) {
-    return 'ИИ ответил не так, как ожидалось. Нажми «Пересобрать» или уточни запрос.';
-  }
-  return 'Не удалось собрать подборку. Попробуй переформулировать запрос.';
-}
-
-async function searchTitle(title: string, adultContent: boolean, mediaTypeFilter: string, signal?: AbortSignal) {
+// Resolve one AI-suggested title against TMDB search. Accepts only a genuine
+// title match (never "any popular result") so an AI hallucination or near-miss
+// can't surface as the wrong real movie. When the AI gave a year, prefer the
+// candidate whose release year matches (±1) — this disambiguates remakes and
+// same-named titles; otherwise the most relevant match wins.
+async function searchTitle(
+  entry: AiTitle,
+  adultContent: boolean,
+  mediaTypeFilter: string,
+  signal?: AbortSignal,
+) {
   const res = await fetchWithTimeout(
-    tmdbUrls.searchMulti(title, adultContent),
+    tmdbUrls.searchMulti(entry.title, adultContent),
     { headers: tmdbHeaders(), signal }
   );
   const data = await res.json();
@@ -308,119 +139,13 @@ async function searchTitle(title: string, adultContent: boolean, mediaTypeFilter
     return m.media_type === 'movie' || m.media_type === 'tv';
   });
 
-  // Only accept a genuine title match. Previously we fell back to "any popular
-  // result", which turned AI hallucinations (or near-miss titles) into the
-  // wrong real movie. Better to drop a title than to show an unrelated one.
-  return results.find((item: any) => isLikelyTitleMatch(title, item)) || null;
-}
-
-// --- Direct TMDB routing -------------------------------------------------
-// Some queries are fully structured ("новинки", a bare genre, "лучшие фильмы")
-// and need no LLM at all. We serve those straight from TMDB /discover — one fast
-// request instead of a slow grounded Gemini call plus N per-title lookups.
-// parseDirectIntent returns null the moment a query carries any free-form intent,
-// so anything nuanced still flows through the AI path.
-
-const MOVIE_GENRE_KEYWORDS: { id: number; re: RegExp }[] = [
-  { id: 28, re: /боевик|экшн|экшен|action/ },
-  { id: 35, re: /комеди|смешн|comedy/ },
-  { id: 18, re: /\bдрам|drama/ },
-  { id: 27, re: /ужас|хоррор|horror/ },
-  { id: 10749, re: /мелодрам|романт|romance/ },
-  { id: 878, re: /фантастик|sci-?fi/ },
-  { id: 53, re: /триллер|thriller/ },
-  { id: 16, re: /анимаци|мультф|мультик|animation/ },
-  { id: 99, re: /документ|documentary/ },
-  { id: 9648, re: /детектив|mystery/ },
-  { id: 14, re: /фэнтези|фэнтэзи|фентези|fantasy/ },
-  { id: 12, re: /приключен|adventure/ },
-  { id: 10751, re: /семейн|family/ },
-  { id: 36, re: /историч|history/ },
-  { id: 10752, re: /военн|\bwar\b/ },
-  { id: 80, re: /криминал|crime|мафи/ },
-  { id: 37, re: /вестерн|western/ },
-];
-
-// Movie genre id → TV genre id where TMDB splits them into separate buckets.
-const MOVIE_TO_TV_GENRE: Record<number, number> = {
-  28: 10759, 12: 10759, 878: 10765, 14: 10765, 10752: 10768,
-};
-
-// Free-form markers the LLM should interpret — their presence disables routing.
-const SEMANTIC_MARKERS = /похож|в стиле|как\s|вайб|настроени|про\s|about|like\s|чтобы|который|где\s/;
-
-const ROUTE_CONNECTORS = new Set([
-  'и', 'а', 'но', 'или', 'со', 'для', 'от', 'до', 'по', 'из', 'во', 'об',
-  'же', 'бы', 'ли', 'это', 'их', 'его', 'ещё', 'еще', 'чтоб', 'там',
-]);
-
-type DirectIntent = { type: 'movie' | 'tv'; params: Record<string, string> };
-
-function parseDirectIntent(query: string, adultContent: boolean): DirectIntent | null {
-  const lower = query.toLowerCase().trim();
-  if (!lower || SEMANTIC_MARKERS.test(lower)) return null;
-
-  const isTv = /сериал|шоу|дорам|сезон/.test(lower);
-  const fresh = isFreshnessQuery(lower);
-  const classic = /класси|ретро|старо|стар(ый|ые|ое)|[789]0-?е|советск|нуар/.test(lower);
-  const topRated = /лучш|\bтоп\b|высок\w*\s*рейтинг|рейтингов|popular|популярн|известн|культов/.test(lower);
-  const genreIds = MOVIE_GENRE_KEYWORDS.filter(g => g.re.test(lower)).map(g => g.id);
-
-  if (!(fresh || classic || topRated || genreIds.length)) return null;
-
-  // Strip every token we recognized. If meaningful words survive, the query is
-  // richer than our structured signals can express → defer to the LLM.
-  let residual = lower
-    .replace(/[«»"“”().,!?:;]/g, ' ')
-    .replace(/\b20[2-9]\d\b/g, ' ')
-    .replace(/[789]0-?е/g, ' ');
-  for (const g of MOVIE_GENRE_KEYWORDS) residual = residual.replace(g.re, ' ');
-  residual = residual
-    .replace(/новинк\w*|новое|новые|новый|свеж\w*|последн\w*|недавн\w*|вышл\w*|recent|latest|\bnew\b|fresh/g, ' ')
-    .replace(/класси\w*|ретро|старо\w*|стар(ый|ые|ое)|советск\w*|нуар/g, ' ')
-    .replace(/лучш\w*|\bтоп\b|высок\w*|рейтинг\w*|popular|популярн\w*|известн\w*|культов\w*/g, ' ')
-    .replace(/фильм\w*|кино|сериал\w*|шоу|дорам\w*|сезон\w*|movies?|films?|shows?|series/g, ' ')
-    .replace(/посмотр\w*|смотр\w*|хочу|покажи|показать|найд\w*|подбер\w*|подборк\w*|watch|want/g, ' ')
-    .replace(/что-?то|нибудь|какой-?нибудь|мне|вечер\w*|сегодня|самы\w*|просто|пожалуйста|good|some/g, ' ')
-    .replace(/хорош\w*|интересн\w*|на\b|\bв\b|\bс\b|\bо\b/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-
-  const leftover = residual.split(' ').filter(t => t.length > 2 && !ROUTE_CONNECTORS.has(t));
-  if (leftover.length > 0) return null;
-
-  const type: 'movie' | 'tv' = isTv ? 'tv' : 'movie';
-  const params: Record<string, string> = {
-    include_adult: String(adultContent),
-    'vote_count.gte': '30',
-  };
-  if (genreIds.length) {
-    const ids = type === 'tv' ? genreIds.map(id => MOVIE_TO_TV_GENRE[id] ?? id) : genreIds;
-    params.with_genres = ids.join(',');
+  const matches = results.filter((item: any) => isLikelyTitleMatch(entry.title, item));
+  if (matches.length === 0) return null;
+  if (entry.year) {
+    const byYear = matches.find((item: any) => Math.abs(getItemYear(item) - entry.year!) <= 1);
+    if (byYear) return byYear;
   }
-
-  const now = new Date();
-  const today = now.toISOString().slice(0, 10);
-  const dateField = type === 'tv' ? 'first_air_date' : 'primary_release_date';
-
-  if (topRated) {
-    params.sort_by = 'vote_average.desc';
-    params['vote_count.gte'] = '300';
-  } else if (fresh) {
-    // "Popular among recent releases" — the most useful reading of "новинки".
-    params.sort_by = 'popularity.desc';
-    params[`${dateField}.gte`] = `${now.getFullYear() - 1}-01-01`;
-    params[`${dateField}.lte`] = today;
-    params['vote_count.gte'] = '10';
-  } else if (classic) {
-    params.sort_by = 'vote_average.desc';
-    params['vote_count.gte'] = '200';
-    params[`${dateField}.lte`] = '2005-12-31';
-  } else {
-    params.sort_by = 'popularity.desc';
-  }
-
-  return { type, params };
+  return matches[0];
 }
 
 async function fetchDirect(intent: DirectIntent, signal?: AbortSignal) {
@@ -455,10 +180,17 @@ export default function MoodScreen({ navigation }: any) {
   // Lazy TMDB resolution of the AI's title list (see RESOLVE_BATCH).
   const [resolvingMore, setResolvingMore] = useState(false);
   const [allResolved, setAllResolved] = useState(false);
-  const aiTitlesRef = useRef<string[]>([]);
+  const aiTitlesRef = useRef<AiTitle[]>([]);
   const aiFilterRef = useRef<string>('mixed');
   const slotsRef = useRef<(any | null)[]>([]);
   const resolveCursorRef = useRef(0);
+  // Titles the user dismissed ("Не подходит"). Tracked in a ref so a later batch
+  // resolving to the same film can't quietly bring it back via rebuildResults.
+  const hiddenKeysRef = useRef<Set<string>>(new Set());
+  // Streaming throttle bookkeeping (see RESULTS_FLUSH_MS). processedCountRef is
+  // the running count of attempted titles; lastFlushRef is the last paint time.
+  const processedCountRef = useRef(0);
+  const lastFlushRef = useRef(0);
   const submitDisabled = !mood.trim() || loading;
 
   // Keep `results` in the AI's relevance order; derive the displayed order so
@@ -511,13 +243,19 @@ export default function MoodScreen({ navigation }: any) {
     }, 200);
   });
 
-  useSpeechRecognitionEvent('error', () => {
+  useSpeechRecognitionEvent('error', (event) => {
     isListeningRef.current = false;
     if (restartTimerRef.current) {
       clearTimeout(restartTimerRef.current);
       restartTimerRef.current = null;
     }
     setIsListening(false);
+    // 'aborted' fires on our own stop()/unmount — not worth surfacing. Anything
+    // else (no-speech, network, not-allowed) means dictation actually failed, so
+    // tell the user instead of the badge just silently vanishing.
+    if (event?.error && event.error !== 'aborted') {
+      setError('Не удалось распознать речь. Попробуй ещё раз или введи текст.');
+    }
   });
 
   useEffect(() => {
@@ -574,11 +312,21 @@ export default function MoodScreen({ navigation }: any) {
     for (const it of slotsRef.current) {
       if (!it) continue;
       const key = `${it.id}-${it.media_type}`;
-      if (seen.has(key)) continue;
+      if (seen.has(key) || hiddenKeysRef.current.has(key)) continue;
       seen.add(key);
       out.push(it);
     }
     return out;
+  };
+
+  // Push the latest counts + list into state, respecting the streaming throttle
+  // unless `force` (the trailing flush after a batch settles, which must be exact).
+  const flushStreaming = (force = false) => {
+    const now = Date.now();
+    if (!force && now - lastFlushRef.current < RESULTS_FLUSH_MS) return;
+    lastFlushRef.current = now;
+    setProcessed(processedCountRef.current);
+    setResults(rebuildResults());
   };
 
   // Resolve the next window of AI titles against TMDB (RESOLVE_BATCH at a time),
@@ -602,8 +350,8 @@ export default function MoodScreen({ navigation }: any) {
           slotsRef.current[i] = null; // one bad title shouldn't kill the batch
         }
         if (!signal.aborted) {
-          setProcessed(p => p + 1);
-          setResults(rebuildResults());
+          processedCountRef.current += 1;
+          flushStreaming();
         }
       }
     };
@@ -612,7 +360,7 @@ export default function MoodScreen({ navigation }: any) {
       Array.from({ length: Math.min(RESOLVE_CONCURRENCY, end - start) }, worker)
     );
     if (signal.aborted) return;
-    setResults(rebuildResults());
+    flushStreaming(true); // trailing flush — final state must be exact, not throttled away
     if (resolveCursorRef.current >= titles.length) setAllResolved(true);
   };
 
@@ -644,6 +392,9 @@ export default function MoodScreen({ navigation }: any) {
     setAllResolved(false);
     slotsRef.current = [];
     resolveCursorRef.current = 0;
+    hiddenKeysRef.current = new Set();
+    processedCountRef.current = 0;
+    lastFlushRef.current = 0;
 
     try {
       // Fast path: structured queries (новинки / жанр / "лучшие") come straight
@@ -684,7 +435,7 @@ export default function MoodScreen({ navigation }: any) {
       }
     } catch (e: any) {
       if (e?.name === 'AbortError') return;
-      console.error(e);
+      logError(e, { scope: 'mood.find', query });
       setError(friendlyAiError(e));
       setShowInput(true);
     } finally {
@@ -716,6 +467,7 @@ export default function MoodScreen({ navigation }: any) {
 
   const hideResult = (item: any) => {
     const key = `${item.id}-${item.media_type}`;
+    hiddenKeysRef.current.add(key);
     slotsRef.current = slotsRef.current.map(slot =>
       slot && `${slot.id}-${slot.media_type}` === key ? null : slot
     );
@@ -731,6 +483,7 @@ export default function MoodScreen({ navigation }: any) {
 
   const reset = () => {
     findAbortRef.current?.abort();
+    hiddenKeysRef.current = new Set();
     setShowInput(true);
     setResults([]);
     setMood('');
@@ -775,7 +528,7 @@ export default function MoodScreen({ navigation }: any) {
                   <Ionicons name="create-outline" size={15} color={colors.accent} />
                   <Text style={styles.actionBtnText}>Уточнить</Text>
                 </TouchableOpacity>
-                <TouchableOpacity style={styles.actionBtn} onPress={() => find(mood)}>
+                <TouchableOpacity style={styles.actionBtn} onPress={() => find(activeQuery || mood)}>
                   <Ionicons name="refresh" size={15} color={colors.accent} />
                   <Text style={styles.actionBtnText}>Пересобрать</Text>
                 </TouchableOpacity>
@@ -877,7 +630,7 @@ export default function MoodScreen({ navigation }: any) {
                         <Ionicons name="create-outline" size={15} color={colors.accent} />
                         <Text style={styles.emptyBtnText}>Уточнить</Text>
                       </TouchableOpacity>
-                      <TouchableOpacity style={styles.emptyBtn} onPress={() => find(mood)}>
+                      <TouchableOpacity style={styles.emptyBtn} onPress={() => find(activeQuery || mood)}>
                         <Ionicons name="refresh" size={15} color={colors.accent} />
                         <Text style={styles.emptyBtnText}>Пересобрать</Text>
                       </TouchableOpacity>

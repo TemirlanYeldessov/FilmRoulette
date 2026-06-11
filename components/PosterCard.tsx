@@ -1,5 +1,5 @@
 import { Image } from 'expo-image';
-import { ReactNode } from 'react';
+import { memo, ReactNode } from 'react';
 import { StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import CardMark from './CardMark';
 import { itemToMovie } from '../utils/tmdb';
@@ -20,7 +20,10 @@ interface Props {
 // search, actor filmography). The shell — type badge, save mark, poster and
 // title — is identical across screens; only the metadata footer differs, so
 // callers pass it as children.
-export default function PosterCard({ item, cardWidth, onPress, mediaTypeFallback, children }: Props) {
+// Memoized: result grids re-render on every streamed batch / parent state tick;
+// without this each tick re-rendered every card (and re-ran itemToMovie per card).
+// Cards only change when their own props do, so memo cuts the work to new arrivals.
+function PosterCard({ item, cardWidth, onPress, mediaTypeFallback, children }: Props) {
   return (
     <TouchableOpacity style={[styles.card, { width: cardWidth }]} onPress={onPress}>
       <View style={styles.typeBadge}>
@@ -39,6 +42,8 @@ export default function PosterCard({ item, cardWidth, onPress, mediaTypeFallback
     </TouchableOpacity>
   );
 }
+
+export default memo(PosterCard);
 
 const styles = StyleSheet.create({
   card: { borderRadius: radii.md },
