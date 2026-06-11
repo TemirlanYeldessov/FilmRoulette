@@ -62,6 +62,10 @@ export type GeminiOptions = {
   seed?: number;
   // Transient-failure retries (429 / 5xx / network). Default 2 → up to 3 calls.
   maxRetries?: number;
+  // Models to try when the primary one is quota-limited (429) or persistently
+  // overloaded. Each Gemini model has its own free-tier quota bucket, so
+  // switching models on 429 effectively multiplies the available quota.
+  fallbackModels?: string[];
 };
 
 const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
@@ -126,6 +130,16 @@ async function callOnce(prompt: string, model: string, options: GeminiOptions): 
       thinkingConfig: { thinkingBudget: 0 },
     },
   };
+  // The app only ever asks for film/TV title lists, but default safety
+  // thresholds false-positive on legitimate queries (slashers, true crime, and
+  // adult-studio titles when the user enabled 18+). Movie titles are metadata,
+  // not explicit content, so relax the filters to the API minimum.
+  body.safetySettings = [
+    'HARM_CATEGORY_HARASSMENT',
+    'HARM_CATEGORY_HATE_SPEECH',
+    'HARM_CATEGORY_SEXUALLY_EXPLICIT',
+    'HARM_CATEGORY_DANGEROUS_CONTENT',
+  ].map(category => ({ category, threshold: 'BLOCK_NONE' }));
   if (options.seed !== undefined) body.generationConfig.seed = options.seed;
   if (useJson) {
     body.generationConfig.responseMimeType = 'application/json';
@@ -218,23 +232,39 @@ async function callOnce(prompt: string, model: string, options: GeminiOptions): 
 // Uses Gemini's public REST API, so CI does not need native Android SDK patches.
 // Retries transient failures (429 / 5xx / network / timeout) with jittered
 // exponential backoff; never retries auth, bad-request or a caller-driven abort.
+// When fallbackModels are given, quota errors (429) hop to the next model
+// immediately — each model has its own free-tier quota, so waiting out a
+// Retry-After on the same model is strictly worse than asking another one.
 export async function askGemini(
   prompt: string,
   model = 'gemini-2.5-flash',
   options: GeminiOptions = {},
 ): Promise<GeminiResponse> {
   const maxRetries = options.maxRetries ?? 2;
-  let attempt = 0;
-  for (;;) {
-    try {
-      return await callOnce(prompt, model, options);
-    } catch (e: any) {
-      if (isAbort(e)) throw e;
-      const retryable = e instanceof AiError && e.retryable;
-      if (!retryable || attempt >= maxRetries || options.signal?.aborted) throw e;
-      attempt += 1;
-      // Throws AbortError if the caller cancels mid-backoff — surfaced as abort.
-      await wait(backoffDelay(attempt, (e as AiError).retryAfterMs), options.signal);
+  const models = [model, ...(options.fallbackModels ?? [])];
+  let lastError: any;
+  for (let mi = 0; mi < models.length; mi += 1) {
+    const hasNextModel = mi < models.length - 1;
+    let attempt = 0;
+    for (;;) {
+      try {
+        return await callOnce(prompt, models[mi], options);
+      } catch (e: any) {
+        if (isAbort(e)) throw e;
+        lastError = e;
+        const ai = e instanceof AiError ? e : null;
+        if (!ai?.retryable || options.signal?.aborted) throw e;
+        // 429 with another model available → switch now, don't burn the backoff.
+        if (ai.kind === 'rate_limit' && hasNextModel) break;
+        if (attempt >= maxRetries) {
+          if (hasNextModel && (ai.kind === 'rate_limit' || ai.kind === 'overloaded')) break;
+          throw e;
+        }
+        attempt += 1;
+        // Throws AbortError if the caller cancels mid-backoff — surfaced as abort.
+        await wait(backoffDelay(attempt, ai.retryAfterMs), options.signal);
+      }
     }
   }
+  throw lastError;
 }

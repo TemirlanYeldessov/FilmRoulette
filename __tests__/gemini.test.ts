@@ -55,6 +55,42 @@ describe('askGemini retry/error handling', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2); // initial + 1 retry
   });
 
+  it('hops to a fallback model immediately on 429 without retrying the first', async () => {
+    const fetchMock = jest.fn()
+      .mockResolvedValueOnce(makeRes(429, 'too many'))
+      .mockResolvedValueOnce(okText('{"ok":true}'));
+    (global as any).fetch = fetchMock;
+
+    const r = await askGemini('p', 'model-a', { maxRetries: 2, fallbackModels: ['model-b'] });
+    expect(r.text).toBe('{"ok":true}');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls[0][0]).toContain('model-a');
+    expect(fetchMock.mock.calls[1][0]).toContain('model-b');
+  });
+
+  it('fails with rate_limit when every model in the chain is quota-limited', async () => {
+    const fetchMock = jest.fn().mockResolvedValue(makeRes(429, 'too many'));
+    (global as any).fetch = fetchMock;
+
+    await expect(
+      askGemini('p', 'model-a', { maxRetries: 0, fallbackModels: ['model-b', 'model-c'] }),
+    ).rejects.toMatchObject({ kind: 'rate_limit' });
+    expect(fetchMock).toHaveBeenCalledTimes(3); // one per model, no in-model retries
+  });
+
+  it('sends relaxed safety settings so title lists are not false-positive blocked', async () => {
+    const fetchMock = jest.fn().mockResolvedValue(okText('{}'));
+    (global as any).fetch = fetchMock;
+
+    await askGemini('p', 'm', { maxRetries: 0 });
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(body.safetySettings).toEqual(
+      expect.arrayContaining([
+        { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_NONE' },
+      ]),
+    );
+  });
+
   it('reports MAX_TOKENS with no text as truncated', async () => {
     (global as any).fetch = jest.fn().mockResolvedValue(
       makeRes(200, { candidates: [{ finishReason: 'MAX_TOKENS', content: { parts: [] } }] }),

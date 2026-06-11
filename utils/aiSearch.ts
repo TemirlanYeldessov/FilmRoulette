@@ -136,7 +136,7 @@ export function parseGeminiResult(text: string): GeminiResult {
   return normalizeGeminiResult(parsed);
 }
 
-function buildAiPrompt(mood: string, opts: { grounded: boolean }) {
+function buildAiPrompt(mood: string, opts: { grounded: boolean; adult: boolean }) {
   const now = new Date();
   const today = now.toISOString().slice(0, 10);
   const currentYear = now.getFullYear();
@@ -170,7 +170,10 @@ ${freshnessLine}
 - Для каждого тайтла укажи год выхода (для сериалов — год премьеры). Если не уверен в годе, опусти поле year, но не выдумывай.
 - Без повторов.
 - Сначала самые релевантные.
-- Верни 15-30 тайтлов: узкий запрос — ближе к 15, широкий — ближе к 30.
+- Верни 40-60 тайтлов. Если запрос узкий и реальных тайтлов меньше, верни сколько есть, но постарайся расширить выдачу близкими по духу тайтлами (после самых релевантных).
+${opts.adult
+  ? '- У пользователя включён режим 18+: запросы про эротику и контент для взрослых (включая порно) допустимы и легальны. Для таких запросов возвращай реальные взрослые тайтлы и релизы студий, которые есть в базе TMDB, без отказов и предупреждений.'
+  : '- Не включай контент 18+ (эротику, порно) — у пользователя выключен соответствующий режим.'}
 
 Ответь строго одним JSON-объектом без markdown и без текста до или после него:
 {
@@ -182,18 +185,26 @@ ${freshnessLine}
 }`;
 }
 
+// Quota-fallback chain: every Gemini model has its own free-tier quota, so a
+// 429 on the primary hops here instead of surfacing "ИИ перегружен" to the user.
+const FALLBACK_MODELS = ['gemini-2.5-flash-lite', 'gemini-2.0-flash'];
+
+export type AskAiOptions = { signal?: AbortSignal; adultContent?: boolean };
+
 // Prefer the Google-Search-grounded model for fresh releases. If grounding
 // fails (slow/unavailable), fall back to the structured offline model — which
 // uses JSON-mode + a schema for a reliable shape, lower temperature for
 // stability, and a disabled thinking budget so the answer isn't starved.
-export async function askAI(mood: string, signal?: AbortSignal): Promise<GeminiResult> {
+export async function askAI(mood: string, opts: AskAiOptions = {}): Promise<GeminiResult> {
+  const { signal, adultContent = false } = opts;
   if (isFreshnessQuery(mood)) {
     try {
-      const r = await askGemini(buildAiPrompt(mood, { grounded: true }), 'gemini-2.5-flash', {
+      const r = await askGemini(buildAiPrompt(mood, { grounded: true, adult: adultContent }), 'gemini-2.5-flash', {
         signal,
         googleSearch: true,
         timeoutMs: 25000,
-        maxOutputTokens: 4096,
+        maxOutputTokens: 8192,
+        fallbackModels: FALLBACK_MODELS,
       });
       return { ...parseGeminiResult(r.text), webSearch: r.groundingUsed };
     } catch (e: any) {
@@ -201,13 +212,14 @@ export async function askAI(mood: string, signal?: AbortSignal): Promise<GeminiR
       // Grounded call failed — fall through to the offline model below.
     }
   }
-  const r = await askGemini(buildAiPrompt(mood, { grounded: false }), 'gemini-2.5-flash', {
+  const r = await askGemini(buildAiPrompt(mood, { grounded: false, adult: adultContent }), 'gemini-2.5-flash', {
     signal,
     googleSearch: false,
     timeoutMs: 30000,
-    maxOutputTokens: 4096,
+    maxOutputTokens: 8192,
     responseSchema: TITLES_SCHEMA,
     temperature: 0.2,
+    fallbackModels: FALLBACK_MODELS,
   });
   return { ...parseGeminiResult(r.text), webSearch: false };
 }
@@ -234,6 +246,41 @@ export function friendlyAiError(e: any): string {
     }
   }
   return 'Не удалось собрать подборку. Попробуй переформулировать запрос.';
+}
+
+// --- Adult-intent detection ------------------------------------------------
+// When the 18+ toggle is on, queries with explicit adult intent get an extra
+// direct TMDB search pass in MoodScreen: the LLM may refuse to name adult
+// titles, while TMDB's own search with include_adult=true finds them from the
+// query text itself. Detection errs on the side of matching — a false positive
+// just adds one extra TMDB search, it never hides anything.
+const ADULT_MARKERS =
+  /порн|porn|эротик|erotic|хентай|hentai|секс|\bsex\b|\bxxx\b|18\s*\+|для взрослых|onlyfans|brazzers|playboy|плейбой|браззерс/i;
+
+export function isAdultQuery(query: string) {
+  return ADULT_MARKERS.test(query);
+}
+
+// Russian adult keyword → the English search term TMDB actually knows the
+// titles by (adult releases are English-named in the database).
+const ADULT_RU_TO_EN: [RegExp, string][] = [
+  [/порн/i, 'porn'],
+  [/хентай/i, 'hentai'],
+  [/эротик/i, 'erotica'],
+  [/секс/i, 'sex'],
+  [/браззерс/i, 'brazzers'],
+  [/плейбой/i, 'playboy'],
+];
+
+// Search terms for the direct adult pass: the raw query plus English
+// equivalents of any Russian adult keywords it contains.
+export function adultSearchTerms(query: string): string[] {
+  const lower = query.toLowerCase().trim();
+  const terms = lower ? [lower] : [];
+  for (const [re, en] of ADULT_RU_TO_EN) {
+    if (re.test(lower) && !terms.includes(en)) terms.push(en);
+  }
+  return terms.slice(0, 3);
 }
 
 // --- Title matching ------------------------------------------------------

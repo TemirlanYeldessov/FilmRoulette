@@ -5,6 +5,8 @@ import {
   parseDirectIntent,
   friendlyAiError,
   isFreshnessQuery,
+  isAdultQuery,
+  adultSearchTerms,
 } from '../utils/aiSearch';
 import { AiError } from '../utils/gemini';
 
@@ -121,6 +123,29 @@ describe('parseDirectIntent', () => {
     const intent = parseDirectIntent('фантастика сериалы', false);
     expect(intent?.type).toBe('tv');
     expect(intent?.params.with_genres).toBe('10765');
+  });
+});
+
+describe('isAdultQuery / adultSearchTerms', () => {
+  it('detects Russian and English adult intent', () => {
+    expect(isAdultQuery('порно новинки')).toBe(true);
+    expect(isAdultQuery('хочу хентай')).toBe(true);
+    expect(isAdultQuery('pornhub')).toBe(true);
+    expect(isAdultQuery('фильмы 18+')).toBe(true);
+  });
+
+  it('stays quiet on normal queries', () => {
+    expect(isAdultQuery('комедии для всей семьи')).toBe(false);
+    expect(isAdultQuery('Sussex murders documentary')).toBe(false);
+  });
+
+  it('adds English equivalents for Russian adult keywords', () => {
+    expect(adultSearchTerms('порно')).toEqual(['порно', 'porn']);
+    expect(adultSearchTerms('хентай аниме')).toEqual(['хентай аниме', 'hentai']);
+  });
+
+  it('keeps an already-English query as-is', () => {
+    expect(adultSearchTerms('pornhub')).toEqual(['pornhub']);
   });
 });
 
