@@ -23,6 +23,7 @@ import { dedup, itemToMovie, mapBaseDetail } from '../utils/tmdb';
 import { makeTmdbFetch } from '../utils/api';
 import { getCached, setCached } from '../utils/apiCache';
 import { tmdbUrls, tmdbHeaders, pickRandomDiscoverItem } from '../utils/tmdbApi';
+import { useTranslation } from '../utils/useTranslation';
 import { tapLight, tapMedium } from '../utils/haptics';
 import { colors, gradients, radii, shadow } from '../constants/theme';
 
@@ -200,6 +201,7 @@ export default function MovieScreen({ route, navigation }: any) {
   const CAST_PREVIEW = 12;
   const fullCast = movie.cast || [];
   const visibleCast = castExpanded ? fullCast : fullCast.slice(0, CAST_PREVIEW);
+  const overviewTr = useTranslation(movie.overview || '');
 
   // Initialize related items when the movie changes OR when recommendations
   // arrive via hydration. Depending on movie.id alone misses the hydrate case:
@@ -439,7 +441,34 @@ export default function MovieScreen({ route, navigation }: any) {
           </View>
         )}
 
-        <Text style={styles.overview}>{movie.overview || 'Описание пока недоступно.'}</Text>
+        <Text style={styles.overview}>
+          {movie.overview ? overviewTr.display : 'Описание пока недоступно.'}
+        </Text>
+
+        {movie.overview && overviewTr.canTranslate && (
+          <TouchableOpacity
+            style={styles.translateBtn}
+            onPress={overviewTr.toggle}
+            disabled={overviewTr.translating}
+            accessibilityRole="button"
+            accessibilityLabel={overviewTr.isTranslated ? 'Показать оригинал описания' : 'Перевести описание на русский'}
+          >
+            {overviewTr.translating ? (
+              <ActivityIndicator size="small" color={colors.accent} />
+            ) : (
+              <Ionicons name="language-outline" size={14} color={colors.accent} />
+            )}
+            <Text style={styles.translateText}>
+              {overviewTr.translating
+                ? 'Перевожу…'
+                : overviewTr.isTranslated ? 'Показать оригинал' : 'Перевести на русский'}
+            </Text>
+          </TouchableOpacity>
+        )}
+
+        {overviewTr.error && (
+          <Text style={styles.translateError}>Не удалось перевести. Попробуй ещё раз.</Text>
+        )}
 
         <View style={styles.quickActions}>
           <TouchableOpacity
@@ -704,6 +733,9 @@ const styles = StyleSheet.create({
   inlineLoading: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 12 },
   inlineLoadingText: { color: colors.muted2, fontSize: 13 },
   overview: { fontSize: 14, color: colors.textSoft, textAlign: 'center', lineHeight: 22, marginBottom: 20 },
+  translateBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, alignSelf: 'center', paddingVertical: 6, paddingHorizontal: 12, marginTop: -12, marginBottom: 8 },
+  translateText: { color: colors.accent, fontSize: 13, fontWeight: '700' },
+  translateError: { color: colors.muted2, fontSize: 12, textAlign: 'center', marginBottom: 16, marginTop: -8 },
   quickActions: { width: '100%', flexDirection: 'row', flexWrap: 'wrap', gap: 8, justifyContent: 'center', marginBottom: 20 },
   quickAction: { minHeight: 40, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, backgroundColor: colors.accentSoft, borderWidth: 1, borderColor: colors.border, paddingHorizontal: 14, paddingVertical: 9, borderRadius: radii.pill },
   quickActionPrimary: { backgroundColor: colors.primary, borderColor: colors.primary },

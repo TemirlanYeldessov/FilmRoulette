@@ -17,6 +17,7 @@ import { itemToMovie } from '../utils/tmdb';
 import { makeTmdbFetch } from '../utils/api';
 import { tmdbUrls, tmdbHeaders } from '../utils/tmdbApi';
 import { useGridColumns } from '../utils/useGridColumns';
+import { useTranslation } from '../utils/useTranslation';
 import { colors, gradients, radii } from '../constants/theme';
 
 const PAGE_SIZE = 20;
@@ -139,10 +140,12 @@ export default function ActorScreen({ route, navigation }: any) {
   };
 
   const bio = person?.biography || '';
+  const bioTr = useTranslation(bio);
+  const displayBio = bioTr.display; // original or its Russian translation
   const hasActiveFilmographyFilters = typeFilter !== 'all' || sortBy !== 'popularity';
   const bioShort = (() => {
-    if (bio.length <= 220) return bio;
-    const cut = bio.slice(0, 220);
+    if (displayBio.length <= 220) return displayBio;
+    const cut = displayBio.slice(0, 220);
     const lastSpace = cut.lastIndexOf(' ');
     return (lastSpace > 150 ? cut.slice(0, lastSpace) : cut) + '…';
   })();
@@ -173,12 +176,22 @@ export default function ActorScreen({ route, navigation }: any) {
 
       {bio.length > 0 && (
         <View style={styles.bioBlock}>
-          <Text style={styles.bioText}>{bioExpanded ? bio : bioShort}</Text>
-          {bio.length > 220 && (
-            <TouchableOpacity onPress={() => setBioExpanded(v => !v)}>
-              <Text style={styles.bioToggle}>{bioExpanded ? 'Свернуть' : 'Читать полностью'}</Text>
-            </TouchableOpacity>
-          )}
+          <Text style={styles.bioText}>{bioExpanded ? displayBio : bioShort}</Text>
+          <View style={styles.bioActions}>
+            {displayBio.length > 220 && (
+              <TouchableOpacity onPress={() => setBioExpanded(v => !v)}>
+                <Text style={styles.bioToggle}>{bioExpanded ? 'Свернуть' : 'Читать полностью'}</Text>
+              </TouchableOpacity>
+            )}
+            {bioTr.canTranslate && (
+              <TouchableOpacity onPress={bioTr.toggle} disabled={bioTr.translating}>
+                <Text style={styles.bioToggle}>
+                  {bioTr.translating ? 'Перевожу…' : bioTr.isTranslated ? 'Оригинал' : 'Перевести на русский'}
+                </Text>
+              </TouchableOpacity>
+            )}
+          </View>
+          {bioTr.error && <Text style={styles.bioTranslateError}>Не удалось перевести. Попробуй ещё раз.</Text>}
         </View>
       )}
 
@@ -308,7 +321,9 @@ const styles = StyleSheet.create({
   meta: { fontSize: 13, color: colors.muted2, textAlign: 'center', marginBottom: 12 },
   bioBlock: { width: '100%', marginBottom: 16 },
   bioText: { color: colors.textSoft, fontSize: 14, lineHeight: 22, textAlign: 'center' },
-  bioToggle: { color: colors.accent, fontSize: 13, textAlign: 'center', marginTop: 6, fontWeight: '700' },
+  bioActions: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'center', gap: 16, marginTop: 6 },
+  bioToggle: { color: colors.accent, fontSize: 13, textAlign: 'center', fontWeight: '700' },
+  bioTranslateError: { color: colors.muted2, fontSize: 12, textAlign: 'center', marginTop: 6 },
   sectionTitle: { fontSize: 17, fontWeight: '800', color: colors.text, alignSelf: 'flex-start', marginTop: 4, marginBottom: 12 },
   controlsRow: { width: '100%', marginBottom: 8 },
   chipRow: { flexDirection: 'row', gap: 8, paddingBottom: 4 },
