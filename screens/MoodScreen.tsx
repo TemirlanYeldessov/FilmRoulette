@@ -31,8 +31,8 @@ import {
   adultSearchTerms,
   friendlyAiError,
   type AiTitle,
-  type DirectIntent,
 } from '../utils/aiSearch';
+import { TmdbFeed } from '../utils/tmdbFeed';
 import { logError } from '../utils/logger';
 import { makeTmdbFetch } from '../utils/api';
 import { tmdbUrls, tmdbHeaders } from '../utils/tmdbApi';
@@ -150,64 +150,31 @@ async function searchTitle(
   return matches[0];
 }
 
-// How many /discover pages the direct route pulls (20 items each). One page
-// felt scarce next to the AI path's 40-60 titles; three keeps it a single
-// parallel burst while filling the grid properly.
-const DIRECT_PAGES = 3;
+// Parse + GET one TMDB endpoint, bound to the screen's timeout/error wording.
+const fetchJson = (url: string, signal?: AbortSignal) =>
+  fetchWithTimeout(url, { headers: tmdbHeaders(), signal }).then(res => res.json());
 
-async function fetchDirect(intent: DirectIntent, signal?: AbortSignal) {
-  const pages = await Promise.all(
-    Array.from({ length: DIRECT_PAGES }, (_, i) =>
-      fetchWithTimeout(
-        tmdbUrls.discover(intent.type, { ...intent.params, page: String(i + 1) }),
-        { headers: tmdbHeaders(), signal }
-      )
-        .then(res => res.json())
-        // A missing later page must not kill the ones that loaded.
-        .catch((e) => { if (e?.name === 'AbortError') throw e; return null; })
-    )
-  );
-  const seen = new Set<number>();
-  const out: any[] = [];
-  for (const data of pages) {
-    for (const m of data?.results || []) {
-      // /discover results omit media_type; the rest of the screen relies on it.
-      if (!m.poster_path || seen.has(m.id)) continue;
-      seen.add(m.id);
-      out.push({ ...m, media_type: intent.type });
-    }
+// Build a paginated TMDB feed for queries that don't need the LLM:
+//   • 18+ on + adult intent → /search/multi over the adult terms (studios for a
+//     generic "porn" ask), so the grid streams real adult releases lazily.
+//   • structured query (новинки / жанр / "лучшие") → a single /discover feed.
+// Returns null for everything nuanced, which then flows through the AI path.
+function buildDirectFeed(query: string, adultContent: boolean): TmdbFeed | null {
+  if (adultContent && isAdultQuery(query)) {
+    return new TmdbFeed(
+      adultSearchTerms(query).map(term => ({
+        makeUrl: (page: number) => tmdbUrls.searchMulti(term, true, page),
+      }))
+    );
   }
-  return out;
-}
-
-// Direct TMDB search pass for adult-intent queries (18+ toggle on). The LLM
-// may refuse to name adult titles, so the grid is seeded straight from TMDB's
-// own search — pornhub/brazzers/hentai releases live in the database and are
-// found by the query text with include_adult=true.
-async function searchAdultDirect(query: string, signal?: AbortSignal) {
-  const terms = adultSearchTerms(query);
-  const pages = await Promise.all(
-    terms.flatMap(term => [1, 2].map(page =>
-      fetchWithTimeout(tmdbUrls.searchMulti(term, true, page), { headers: tmdbHeaders(), signal })
-        .then(res => res.json())
-        // One failed term/page must not kill the rest of the pass.
-        .catch((e) => { if (e?.name === 'AbortError') throw e; return null; })
-    ))
-  );
-  const seen = new Set<string>();
-  const out: any[] = [];
-  for (const data of pages) {
-    for (const m of data?.results || []) {
-      if (m.media_type !== 'movie' && m.media_type !== 'tv') continue;
-      if (!m.poster_path) continue;
-      const key = `${m.id}-${m.media_type}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      out.push(m);
-    }
+  const intent = parseDirectIntent(query, adultContent);
+  if (intent) {
+    return new TmdbFeed([{
+      makeUrl: (page: number) => tmdbUrls.discover(intent.type, { ...intent.params, page: String(page) }),
+      fixedType: intent.type,
+    }]);
   }
-  // Big-studio releases first — popularity is the only useful rank here.
-  return out.sort((a: any, b: any) => (b.popularity || 0) - (a.popularity || 0));
+  return null;
 }
 
 export default function MoodScreen({ navigation }: any) {
@@ -223,6 +190,10 @@ export default function MoodScreen({ navigation }: any) {
   const [error, setError] = useState('');
   const [processed, setProcessed] = useState(0);
   const [totalTitles, setTotalTitles] = useState(0);
+  // Best-effort count of how many titles the active feed has in total (TMDB
+  // total_results). Drives the "Найдено: N из M" hint so the user knows more
+  // will load on scroll. 0 for the AI path, where the title list is the total.
+  const [totalAvailable, setTotalAvailable] = useState(0);
   const [sortBy, setSortBy] = useState<SortKey>('relevance');
   // Set when a freshness query had to use the offline fallback (no web search),
   // so the user knows the "new releases" may be incomplete/stale.
@@ -233,9 +204,10 @@ export default function MoodScreen({ navigation }: any) {
   const aiTitlesRef = useRef<AiTitle[]>([]);
   const aiFilterRef = useRef<string>('mixed');
   const slotsRef = useRef<(any | null)[]>([]);
-  // Items from the direct adult TMDB pass — shown ahead of the AI's slots and
-  // kept separate so the slot/title indices stay aligned.
-  const seedsRef = useRef<any[]>([]);
+  // Set when the query is served by a paginated TMDB feed (adult search or
+  // structured /discover) instead of the AI title path. loadMoreResults pulls
+  // the next page from it on scroll.
+  const feedRef = useRef<TmdbFeed | null>(null);
   const resolveCursorRef = useRef(0);
   // Titles the user dismissed ("Не подходит"). Tracked in a ref so a later batch
   // resolving to the same film can't quietly bring it back via rebuildResults.
@@ -362,7 +334,7 @@ export default function MoodScreen({ navigation }: any) {
   const rebuildResults = () => {
     const seen = new Set<string>();
     const out: any[] = [];
-    for (const it of [...seedsRef.current, ...slotsRef.current]) {
+    for (const it of slotsRef.current) {
       if (!it) continue;
       const key = `${it.id}-${it.media_type}`;
       if (seen.has(key) || hiddenKeysRef.current.has(key)) continue;
@@ -440,46 +412,42 @@ export default function MoodScreen({ navigation }: any) {
     setShowInput(false);
     setProcessed(0);
     setTotalTitles(0);
+    setTotalAvailable(0);
     setStaleNotice(false);
     setResolvingMore(false);
     setAllResolved(false);
     slotsRef.current = [];
-    seedsRef.current = [];
+    feedRef.current = null;
     resolveCursorRef.current = 0;
     hiddenKeysRef.current = new Set();
     processedCountRef.current = 0;
     lastFlushRef.current = 0;
 
     try {
-      // Fast path: structured queries (новинки / жанр / "лучшие") come straight
-      // from TMDB /discover — one request, no slow grounded LLM round-trip.
-      const intent = parseDirectIntent(query, adultContent);
-      if (intent) {
-        const items = await fetchDirect(intent, signal);
-        if (signal.aborted) return;
+      // Direct path: adult / structured queries are served by a paginated TMDB
+      // feed — no slow LLM round-trip, and the full result pool (thousands of
+      // titles) streams in lazily on scroll instead of being capped up front.
+      const feed = buildDirectFeed(query, adultContent);
+      if (feed) {
+        feedRef.current = feed;
+        // Pull pages until the grid has something to show (or the feed runs
+        // dry) — a first page can be all posterless/dupe items.
+        let items: any[] = [];
+        for (let guard = 0; guard < 5 && items.length === 0 && !feed.exhausted; guard += 1) {
+          const fresh = await feed.loadNext(u => fetchJson(u, signal), hiddenKeysRef.current);
+          if (signal.aborted) return;
+          items = items.concat(fresh);
+        }
         if (items.length > 0) {
-          slotsRef.current = items;
           setResults(items);
           setTotalTitles(items.length);
+          setTotalAvailable(feed.total);
           setProcessed(items.length);
-          setAllResolved(true);
+          setAllResolved(feed.exhausted);
           return;
         }
-        // Empty discover (rare) → fall through to the AI path below.
-      }
-
-      // 18+ on + explicit adult intent → seed the grid straight from TMDB
-      // search before the AI runs. The model may refuse to name adult titles;
-      // this pass guarantees pornhub/brazzers/hentai releases still show up.
-      if (adultContent && isAdultQuery(query)) {
-        const seeds = await searchAdultDirect(query, signal);
-        if (signal.aborted) return;
-        if (seeds.length > 0) {
-          seedsRef.current = seeds;
-          setTotalTitles(seeds.length);
-          setProcessed(seeds.length);
-          setResults(rebuildResults());
-        }
+        // Feed produced nothing usable → drop it and fall through to the AI path.
+        feedRef.current = null;
       }
 
       const aiResult = await askAI(query, { signal, adultContent });
@@ -492,8 +460,7 @@ export default function MoodScreen({ navigation }: any) {
       aiTitlesRef.current = aiResult.titles;
       aiFilterRef.current = aiResult.mediaTypeFilter;
       slotsRef.current = new Array(aiResult.titles.length).fill(undefined);
-      processedCountRef.current = seedsRef.current.length;
-      setTotalTitles(seedsRef.current.length + aiResult.titles.length);
+      setTotalTitles(aiResult.titles.length);
 
       // Resolve the first page now; the rest stream in on scroll. Keep going if
       // an early page yields nothing on TMDB, so the empty state stays honest
@@ -505,12 +472,6 @@ export default function MoodScreen({ navigation }: any) {
     } catch (e: any) {
       if (e?.name === 'AbortError') return;
       logError(e, { scope: 'mood.find', query });
-      // The adult seed pass already filled the grid — an AI refusal or rate
-      // limit on top of it shouldn't replace real results with an error screen.
-      if (seedsRef.current.length > 0) {
-        setAllResolved(true);
-        return;
-      }
       setError(friendlyAiError(e));
       setShowInput(true);
     } finally {
@@ -520,15 +481,25 @@ export default function MoodScreen({ navigation }: any) {
     }
   };
 
-  // Resolve the next page when the grid nears its end.
+  // Load the next page when the grid nears its end — a feed page for the direct
+  // path, or the next batch of AI titles otherwise.
   const loadMoreResults = async () => {
     if (loading || resolvingMore || allResolved) return;
     const controller = findAbortRef.current;
     if (!controller || controller.signal.aborted) return;
-    if (resolveCursorRef.current >= aiTitlesRef.current.length) { setAllResolved(true); return; }
+    const { signal } = controller;
     setResolvingMore(true);
     try {
-      await resolveNextBatch(controller.signal);
+      const feed = feedRef.current;
+      if (feed) {
+        const fresh = await feed.loadNext(u => fetchJson(u, signal), hiddenKeysRef.current);
+        if (signal.aborted) return;
+        if (fresh.length) setResults(prev => [...prev, ...fresh]);
+        if (feed.exhausted) setAllResolved(true);
+        return;
+      }
+      if (resolveCursorRef.current >= aiTitlesRef.current.length) { setAllResolved(true); return; }
+      await resolveNextBatch(signal);
     } finally {
       if (!controller.signal.aborted) setResolvingMore(false);
     }
@@ -559,7 +530,7 @@ export default function MoodScreen({ navigation }: any) {
   const reset = () => {
     findAbortRef.current?.abort();
     hiddenKeysRef.current = new Set();
-    seedsRef.current = [];
+    feedRef.current = null;
     setShowInput(true);
     setResults([]);
     setMood('');
@@ -598,7 +569,10 @@ export default function MoodScreen({ navigation }: any) {
             ) : null
           ) : (
             <View style={styles.resultActions}>
-              <Text style={styles.countText}>Найдено: {results.length}</Text>
+              <Text style={styles.countText}>
+                Найдено: {results.length}
+                {!allResolved && totalAvailable > results.length ? ` из ${totalAvailable}` : ''}
+              </Text>
               <View style={styles.actionBtns}>
                 <TouchableOpacity style={styles.actionBtn} onPress={refine}>
                   <Ionicons name="create-outline" size={15} color={colors.accent} />

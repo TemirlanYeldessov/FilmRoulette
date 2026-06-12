@@ -6,6 +6,7 @@ import {
   friendlyAiError,
   isFreshnessQuery,
   isAdultQuery,
+  isGenericAdultQuery,
   adultSearchTerms,
 } from '../utils/aiSearch';
 import { AiError } from '../utils/gemini';
@@ -139,13 +140,36 @@ describe('isAdultQuery / adultSearchTerms', () => {
     expect(isAdultQuery('Sussex murders documentary')).toBe(false);
   });
 
-  it('adds English equivalents for Russian adult keywords', () => {
-    expect(adultSearchTerms('порно')).toEqual(['порно', 'porn']);
-    expect(adultSearchTerms('хентай аниме')).toEqual(['хентай аниме', 'hentai']);
+  it('leads a generic porn ask with big studios', () => {
+    const terms = adultSearchTerms('порно');
+    expect(terms.slice(0, 4)).toEqual(['blacked', 'brazzers', 'tushy', 'naughty america']);
+    expect(terms).toContain('porn');
   });
 
-  it('keeps an already-English query as-is', () => {
-    expect(adultSearchTerms('pornhub')).toEqual(['pornhub']);
+  it('treats pornhub as a generic ask (studios) too', () => {
+    expect(adultSearchTerms('pornhub')).toContain('blacked');
+  });
+
+  it('searches a non-porn adult keyword by itself, no studios', () => {
+    expect(adultSearchTerms('хентай')).toEqual(['hentai']);
+  });
+
+  it('searches a specific named query verbatim', () => {
+    expect(adultSearchTerms('blacked raw')).toEqual(['blacked raw']);
+    expect(adultSearchTerms('хентай аниме')).toEqual(['хентай аниме', 'hentai']);
+  });
+});
+
+describe('isGenericAdultQuery', () => {
+  it('is true for a bare adult ask', () => {
+    expect(isGenericAdultQuery('порно')).toBe(true);
+    expect(isGenericAdultQuery('хочу посмотреть порно')).toBe(true);
+    expect(isGenericAdultQuery('18+')).toBe(true);
+  });
+
+  it('is false when a specific topic survives', () => {
+    expect(isGenericAdultQuery('blacked raw')).toBe(false);
+    expect(isGenericAdultQuery('эротический триллер с Шерон Стоун')).toBe(false);
   });
 });
 

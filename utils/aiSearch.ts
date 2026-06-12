@@ -170,7 +170,7 @@ ${freshnessLine}
 - Для каждого тайтла укажи год выхода (для сериалов — год премьеры). Если не уверен в годе, опусти поле year, но не выдумывай.
 - Без повторов.
 - Сначала самые релевантные.
-- Верни 40-60 тайтлов. Если запрос узкий и реальных тайтлов меньше, верни сколько есть, но постарайся расширить выдачу близкими по духу тайтлами (после самых релевантных).
+- Верни как можно больше реально подходящих тайтлов, без искусственного ограничения сверху: для широкого запроса это легко 60-100+, для узкого — столько, сколько реально существует. Не добивай список выдуманными или нерелевантными тайтлами ради количества.
 ${opts.adult
   ? '- У пользователя включён режим 18+: запросы про эротику и контент для взрослых (включая порно) допустимы и легальны. Для таких запросов возвращай реальные взрослые тайтлы и релизы студий, которые есть в базе TMDB, без отказов и предупреждений.'
   : '- Не включай контент 18+ (эротику, порно) — у пользователя выключен соответствующий режим.'}
@@ -272,15 +272,47 @@ const ADULT_RU_TO_EN: [RegExp, string][] = [
   [/плейбой/i, 'playboy'],
 ];
 
-// Search terms for the direct adult pass: the raw query plus English
-// equivalents of any Russian adult keywords it contains.
+// Big adult studios whose TMDB catalogues are dense with real releases. A bare
+// "porn" text search returns mostly mainstream documentaries; leading with
+// these surfaces actual studio titles (Blacked Raw, Brazzers Exxtra, …) that a
+// literal keyword search never matches by name. (vixen / reality kings dropped —
+// they return mostly mainstream or too few results.)
+const ADULT_STUDIO_TERMS = ['blacked', 'brazzers', 'tushy', 'naughty america'];
+
+// True when the query is a broad ask for adult content in general (bare "porn",
+// "порно", "18+", a studio name) rather than a specific title/topic. Detected by
+// stripping every adult keyword + filler and checking nothing meaningful is left.
+export function isGenericAdultQuery(query: string): boolean {
+  // \w doesn't match Cyrillic in JS regex, so Russian stems use [а-яё]* to
+  // swallow the inflected ending (посмотр[еть], эротик[а]...).
+  const residual = query
+    .toLowerCase()
+    .replace(/порно|porno|порн|porn(hub)?|порнхаб|эротик[а-яё]*|erotica|erotic|хентай|hentai|секс|\bsex\b|\bxxx\b|18\s*\+|для\s+взрослых|adult|взросл[а-яё]*|onlyfans|blacked|brazzers|tushy|vixen|naughty\s*america|reality\s*kings|playboy|плейбой|браззерс/gi, ' ')
+    .replace(/хочу|покажи|показать|смотреть|посмотр[а-яё]*|найд[а-яё]*|подбер[а-яё]*|видео|ролик[а-яё]*|фильм[а-яё]*|кино|сцен[а-яё]*|что-?то|какое-?то|какой-?нибудь|нибудь|мне|пожалуйста|немного|good|some|watch|want|movies?|films?|videos?|clips?/gi, ' ')
+    .replace(/[^a-zа-яё0-9]+/gi, ' ')
+    .trim();
+  return residual.length === 0;
+}
+
+// Search terms for the direct adult feed. A specific ask (named studio/actor/
+// parody) is searched verbatim; a generic porn ask leads with big studios so the
+// grid fills with real releases instead of "porn" documentaries.
 export function adultSearchTerms(query: string): string[] {
   const lower = query.toLowerCase().trim();
-  const terms = lower ? [lower] : [];
-  for (const [re, en] of ADULT_RU_TO_EN) {
-    if (re.test(lower) && !terms.includes(en)) terms.push(en);
+  const terms: string[] = [];
+  const add = (t: string) => { const k = t.trim(); if (k && !terms.includes(k)) terms.push(k); };
+
+  if (isGenericAdultQuery(query)) {
+    const porny = /порно|porn|порнхаб|pornhub|18\s*\+|для\s+взрослых|\bxxx\b|секс|\bsex\b/i.test(lower);
+    if (porny) ADULT_STUDIO_TERMS.forEach(add);
+    for (const [re, en] of ADULT_RU_TO_EN) if (re.test(lower)) add(en);
+    if (porny) add('porn');
+    if (terms.length === 0) add(lower || 'porn');
+  } else {
+    if (lower) add(lower);
+    for (const [re, en] of ADULT_RU_TO_EN) if (re.test(lower)) add(en);
   }
-  return terms.slice(0, 3);
+  return terms.slice(0, 8);
 }
 
 // --- Title matching ------------------------------------------------------
