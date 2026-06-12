@@ -68,6 +68,24 @@ describe('askGemini retry/error handling', () => {
     expect(fetchMock.mock.calls[1][0]).toContain('model-b');
   });
 
+  it('uses per-model maxOutputTokens when fallback models are tried', async () => {
+    const fetchMock = jest.fn()
+      .mockResolvedValueOnce(makeRes(429, 'too many'))
+      .mockResolvedValueOnce(okText('{"ok":true}'));
+    (global as any).fetch = fetchMock;
+
+    await askGemini('p', 'model-a', {
+      maxRetries: 0,
+      fallbackModels: ['model-b'],
+      maxOutputTokens: { default: 1000, 'model-b': 2000 },
+    });
+
+    const firstBody = JSON.parse(fetchMock.mock.calls[0][1].body);
+    const secondBody = JSON.parse(fetchMock.mock.calls[1][1].body);
+    expect(firstBody.generationConfig.maxOutputTokens).toBe(1000);
+    expect(secondBody.generationConfig.maxOutputTokens).toBe(2000);
+  });
+
   it('fails with rate_limit when every model in the chain is quota-limited', async () => {
     const fetchMock = jest.fn().mockResolvedValue(makeRes(429, 'too many'));
     (global as any).fetch = fetchMock;

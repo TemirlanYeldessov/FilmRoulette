@@ -44,7 +44,7 @@ const RESOLVE_CONCURRENCY = 6;
 // How many AI titles to resolve against TMDB per page. The first page fills the
 // initial screen; the rest resolve on scroll so a 50-title pick doesn't fire 50
 // TMDB searches up front when the user may only look at the first few.
-const RESOLVE_BATCH = 12;
+const RESOLVE_BATCH = 20;
 // Coalesce streaming result updates to at most one per this interval. Workers
 // resolve titles faster than the grid needs to repaint; without this each batch
 // fired up to RESOLVE_BATCH full-list setStates, janking the grid on slow phones.
@@ -107,6 +107,15 @@ const SORT_OPTIONS = [
 ] as const;
 
 type SortKey = (typeof SORT_OPTIONS)[number]['key'];
+
+function sortResultItems(items: any[], sortKey: SortKey) {
+  if (sortKey === 'relevance') return items;
+  const arr = [...items];
+  if (sortKey === 'rating') arr.sort((a, b) => (b.vote_average || 0) - (a.vote_average || 0));
+  else if (sortKey === 'year') arr.sort((a, b) => getItemYear(b) - getItemYear(a));
+  else if (sortKey === 'popularity') arr.sort((a, b) => (b.popularity || 0) - (a.popularity || 0));
+  return arr;
+}
 
 const QUICK_REFINES = [
   { label: 'Свежее', suffix: 'Покажи более свежие варианты, без старых тайтлов.' },
@@ -195,6 +204,7 @@ export default function MoodScreen({ navigation }: any) {
   // will load on scroll. 0 for the AI path, where the title list is the total.
   const [totalAvailable, setTotalAvailable] = useState(0);
   const [sortBy, setSortBy] = useState<SortKey>('relevance');
+  const [sortRevision, setSortRevision] = useState(0);
   // Set when a freshness query had to use the offline fallback (no web search),
   // so the user knows the "new releases" may be incomplete/stale.
   const [staleNotice, setStaleNotice] = useState(false);
@@ -209,6 +219,9 @@ export default function MoodScreen({ navigation }: any) {
   // the next page from it on scroll.
   const feedRef = useRef<TmdbFeed | null>(null);
   const resolveCursorRef = useRef(0);
+  // Sorting is applied to the currently loaded prefix only. Later infinite
+  // scroll batches append below it, so cards already on screen do not jump.
+  const sortPinnedCountRef = useRef(0);
   // Titles the user dismissed ("Не подходит"). Tracked in a ref so a later batch
   // resolving to the same film can't quietly bring it back via rebuildResults.
   const hiddenKeysRef = useRef<Set<string>>(new Set());
@@ -217,20 +230,18 @@ export default function MoodScreen({ navigation }: any) {
   const processedCountRef = useRef(0);
   const lastFlushRef = useRef(0);
   const submitDisabled = !mood.trim() || loading;
+  const totalKnownResults = totalAvailable || totalTitles;
 
-  // Keep `results` in the AI's relevance order; derive the displayed order so
-  // switching sort never loses the original ranking ('relevance' returns it).
-  // While results are still streaming in, hold the relevance order so cards
-  // don't reshuffle on every arrival (which makes them jump under the finger);
-  // the chosen sort is applied once the batch settles.
+  // Keep `results` in relevance/load order. A non-relevance sort ranks the
+  // loaded prefix the user explicitly sorted, while later batches append below.
   const sortedResults = useMemo(() => {
-    if (sortBy === 'relevance' || loading) return results;
-    const arr = [...results];
-    if (sortBy === 'rating') arr.sort((a, b) => (b.vote_average || 0) - (a.vote_average || 0));
-    else if (sortBy === 'year') arr.sort((a, b) => getItemYear(b) - getItemYear(a));
-    else if (sortBy === 'popularity') arr.sort((a, b) => (b.popularity || 0) - (a.popularity || 0));
-    return arr;
-  }, [results, sortBy, loading]);
+    if (sortBy === 'relevance') return results;
+    const pinnedCount = Math.min(sortPinnedCountRef.current || results.length, results.length);
+    return [
+      ...sortResultItems(results.slice(0, pinnedCount), sortBy),
+      ...results.slice(pinnedCount),
+    ];
+  }, [results, sortBy, sortRevision]);
   const restartTimerRef = useRef<any>(null);
   const findAbortRef = useRef<AbortController | null>(null);
   // Synchronous mirror of isListening — the 'end' event from native can fire
@@ -354,9 +365,10 @@ export default function MoodScreen({ navigation }: any) {
     setResults(rebuildResults());
   };
 
-  // Resolve the next window of AI titles against TMDB (RESOLVE_BATCH at a time),
-  // streaming results in the AI's order as each resolves.
-  const resolveNextBatch = async (signal: AbortSignal) => {
+  // Resolve the next window of AI titles against TMDB (RESOLVE_BATCH at a time).
+  // Initial search may stream into the empty grid; scroll-loaded batches flush
+  // once at the end so the visible list stays anchored.
+  const resolveNextBatch = async (signal: AbortSignal, stream = true) => {
     const titles = aiTitlesRef.current;
     const start = resolveCursorRef.current;
     if (start >= titles.length) { setAllResolved(true); return; }
@@ -376,7 +388,7 @@ export default function MoodScreen({ navigation }: any) {
         }
         if (!signal.aborted) {
           processedCountRef.current += 1;
-          flushStreaming();
+          if (stream) flushStreaming();
         }
       }
     };
@@ -387,6 +399,12 @@ export default function MoodScreen({ navigation }: any) {
     if (signal.aborted) return;
     flushStreaming(true); // trailing flush — final state must be exact, not throttled away
     if (resolveCursorRef.current >= titles.length) setAllResolved(true);
+  };
+
+  const applySort = (nextSort: SortKey) => {
+    sortPinnedCountRef.current = nextSort === 'relevance' ? 0 : results.length;
+    setSortBy(nextSort);
+    setSortRevision(v => v + 1);
   };
 
   const find = async (text: string) => {
@@ -413,12 +431,15 @@ export default function MoodScreen({ navigation }: any) {
     setProcessed(0);
     setTotalTitles(0);
     setTotalAvailable(0);
+    setSortBy('relevance');
+    setSortRevision(v => v + 1);
     setStaleNotice(false);
     setResolvingMore(false);
     setAllResolved(false);
     slotsRef.current = [];
     feedRef.current = null;
     resolveCursorRef.current = 0;
+    sortPinnedCountRef.current = 0;
     hiddenKeysRef.current = new Set();
     processedCountRef.current = 0;
     lastFlushRef.current = 0;
@@ -499,7 +520,7 @@ export default function MoodScreen({ navigation }: any) {
         return;
       }
       if (resolveCursorRef.current >= aiTitlesRef.current.length) { setAllResolved(true); return; }
-      await resolveNextBatch(signal);
+      await resolveNextBatch(signal, false);
     } finally {
       if (!controller.signal.aborted) setResolvingMore(false);
     }
@@ -536,8 +557,11 @@ export default function MoodScreen({ navigation }: any) {
     setMood('');
     setActiveQuery('');
     setError('');
+    setSortBy('relevance');
+    setSortRevision(v => v + 1);
     setResolvingMore(false);
     setAllResolved(false);
+    sortPinnedCountRef.current = 0;
   };
 
   // Back to the input but keep the typed query, so the user can tweak it.
@@ -571,7 +595,7 @@ export default function MoodScreen({ navigation }: any) {
             <View style={styles.resultActions}>
               <Text style={styles.countText}>
                 Найдено: {results.length}
-                {!allResolved && totalAvailable > results.length ? ` из ${totalAvailable}` : ''}
+                {!allResolved && totalKnownResults > results.length ? ` из ${totalKnownResults}` : ''}
               </Text>
               <View style={styles.actionBtns}>
                 <TouchableOpacity style={styles.actionBtn} onPress={refine}>
@@ -617,7 +641,7 @@ export default function MoodScreen({ navigation }: any) {
               <TouchableOpacity
                 key={opt.key}
                 style={[styles.sortChip, sortBy === opt.key && styles.sortChipActive]}
-                onPress={() => setSortBy(opt.key)}
+                onPress={() => applySort(opt.key)}
               >
                 <Ionicons name={opt.icon} size={13} color={sortBy === opt.key ? colors.text : colors.accent} />
                 <Text style={[styles.sortChipText, sortBy === opt.key && styles.sortChipTextActive]}>{opt.label}</Text>

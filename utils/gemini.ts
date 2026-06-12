@@ -52,7 +52,7 @@ export type GeminiOptions = {
   signal?: AbortSignal;
   googleSearch?: boolean;
   timeoutMs?: number;
-  maxOutputTokens?: number;
+  maxOutputTokens?: number | { default?: number; [model: string]: number | undefined };
   temperature?: number;
   // When set (and googleSearch is off) the model is constrained to strict JSON
   // matching this schema. Grounding and JSON mode are mutually exclusive on the
@@ -70,6 +70,12 @@ export type GeminiOptions = {
 
 const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
 const isAbort = (e: any) => e?.name === 'AbortError';
+
+function maxOutputTokensForModel(value: GeminiOptions['maxOutputTokens'], model: string) {
+  if (typeof value === 'number') return value;
+  if (value && typeof value === 'object') return value[model] ?? value.default ?? 4096;
+  return 4096;
+}
 
 function abortError() {
   const e = new Error('Aborted');
@@ -122,7 +128,7 @@ async function callOnce(prompt: string, model: string, options: GeminiOptions): 
     contents: [{ role: 'user', parts: [{ text: prompt }] }],
     generationConfig: {
       temperature: options.temperature ?? 0.3,
-      maxOutputTokens: options.maxOutputTokens ?? 4096,
+      maxOutputTokens: maxOutputTokensForModel(options.maxOutputTokens, model),
       // gemini-2.5-flash enables "thinking" by default, and those tokens count
       // against maxOutputTokens — they can devour the whole budget and leave an
       // empty or truncated answer (the main "works every other time" bug). This

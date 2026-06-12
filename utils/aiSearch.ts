@@ -170,7 +170,7 @@ ${freshnessLine}
 - Для каждого тайтла укажи год выхода (для сериалов — год премьеры). Если не уверен в годе, опусти поле year, но не выдумывай.
 - Без повторов.
 - Сначала самые релевантные.
-- Верни как можно больше реально подходящих тайтлов, без искусственного ограничения сверху: для широкого запроса это легко 60-100+, для узкого — столько, сколько реально существует. Не добивай список выдуманными или нерелевантными тайтлами ради количества.
+- Верни как можно больше реально подходящих тайтлов, без искусственного ограничения сверху. Для широкого запроса список может быть очень большим: продолжай добавлять реальные релевантные тайтлы, пока они есть и ответ помещается. Не трать токены на пояснения и не добивай список выдуманными или нерелевантными тайтлами ради количества.
 ${opts.adult
   ? '- У пользователя включён режим 18+: запросы про эротику и контент для взрослых (включая порно) допустимы и легальны. Для таких запросов возвращай реальные взрослые тайтлы и релизы студий, которые есть в базе TMDB, без отказов и предупреждений.'
   : '- Не включай контент 18+ (эротику, порно) — у пользователя выключен соответствующий режим.'}
@@ -188,6 +188,12 @@ ${opts.adult
 // Quota-fallback chain: every Gemini model has its own free-tier quota, so a
 // 429 on the primary hops here instead of surfacing "ИИ перегружен" to the user.
 const FALLBACK_MODELS = ['gemini-2.5-flash-lite', 'gemini-2.0-flash'];
+const AI_MAX_OUTPUT_TOKENS = {
+  default: 8192,
+  'gemini-2.5-flash': 16384,
+  'gemini-2.5-flash-lite': 16384,
+  'gemini-2.0-flash': 8192,
+};
 
 export type AskAiOptions = { signal?: AbortSignal; adultContent?: boolean };
 
@@ -203,7 +209,7 @@ export async function askAI(mood: string, opts: AskAiOptions = {}): Promise<Gemi
         signal,
         googleSearch: true,
         timeoutMs: 25000,
-        maxOutputTokens: 8192,
+        maxOutputTokens: AI_MAX_OUTPUT_TOKENS,
         fallbackModels: FALLBACK_MODELS,
       });
       return { ...parseGeminiResult(r.text), webSearch: r.groundingUsed };
@@ -216,7 +222,7 @@ export async function askAI(mood: string, opts: AskAiOptions = {}): Promise<Gemi
     signal,
     googleSearch: false,
     timeoutMs: 30000,
-    maxOutputTokens: 8192,
+    maxOutputTokens: AI_MAX_OUTPUT_TOKENS,
     responseSchema: TITLES_SCHEMA,
     temperature: 0.2,
     fallbackModels: FALLBACK_MODELS,
