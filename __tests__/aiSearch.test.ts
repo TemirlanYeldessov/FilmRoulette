@@ -3,11 +3,13 @@ import {
   normalizeGeminiResult,
   isLikelyTitleMatch,
   parseDirectIntent,
+  buildFillIntents,
   friendlyAiError,
   isFreshnessQuery,
   isAdultQuery,
   isGenericAdultQuery,
   adultSearchTerms,
+  type GeminiResult,
 } from '../utils/aiSearch';
 import { AiError } from '../utils/gemini';
 
@@ -70,6 +72,76 @@ describe('normalizeGeminiResult', () => {
     } catch (e: any) {
       expect(e.kind).toBe('titles_empty');
     }
+  });
+
+  it('parses discover hints, dropping unknown genres and junk sort', () => {
+    const r = normalizeGeminiResult({
+      titles: ['A'],
+      discover: { genres: ['drama', 'banana', 'drama', 'thriller'], keywords: ['Isekai', 'isekai', ''], yearFrom: 1990, sort: 'loud' },
+    });
+    expect(r.discover).toEqual({ genres: ['drama', 'thriller'], keywords: ['isekai'], yearFrom: 1990, yearTo: null, sort: null });
+  });
+
+  it('caps keywords at three', () => {
+    const r = normalizeGeminiResult({ titles: ['A'], discover: { keywords: ['a', 'b', 'c', 'd', 'e'] } });
+    expect(r.discover?.keywords).toEqual(['a', 'b', 'c']);
+  });
+
+  it('leaves discover null when absent or fully empty', () => {
+    expect(normalizeGeminiResult({ titles: ['A'] }).discover).toBeNull();
+    expect(normalizeGeminiResult({ titles: ['A'], discover: { genres: [], keywords: [] } }).discover).toBeNull();
+  });
+});
+
+describe('buildFillIntents', () => {
+  const make = (discover: GeminiResult['discover'], mediaTypeFilter: GeminiResult['mediaTypeFilter'] = 'movie'): GeminiResult =>
+    ({ mediaTypeFilter, titles: [{ title: 'X', year: null }], discover, webSearch: false });
+  const hints = (over: Partial<NonNullable<GeminiResult['discover']>>): GeminiResult['discover'] =>
+    ({ genres: [], keywords: [], yearFrom: null, yearTo: null, sort: null, ...over });
+
+  it('returns nothing without usable genres or keywords', () => {
+    expect(buildFillIntents(make(null), false)).toEqual([]);
+    expect(buildFillIntents(make(hints({ yearFrom: 1990 })), false)).toEqual([]);
+  });
+
+  it('OR-joins genre ids for a broad movie pool', () => {
+    const [intent] = buildFillIntents(make(hints({ genres: ['drama', 'thriller'] })), false);
+    expect(intent.type).toBe('movie');
+    expect(intent.params.with_genres).toBe('18|53');
+    expect(intent.params.sort_by).toBe('popularity.desc');
+    expect(intent.params.include_adult).toBe('false');
+  });
+
+  it('prefers resolved keyword ids over genres, relaxing the vote floor', () => {
+    const [intent] = buildFillIntents(make(hints({ genres: ['animation'], keywords: ['isekai'] }), 'tv'), false, [210024]);
+    expect(intent.params.with_keywords).toBe('210024');
+    expect(intent.params.with_genres).toBeUndefined();
+    expect(intent.params['vote_count.gte']).toBe('5');
+  });
+
+  it('falls back to genres when no keyword resolved', () => {
+    const [intent] = buildFillIntents(make(hints({ genres: ['animation'], keywords: ['isekai'] }), 'tv'), false, []);
+    expect(intent.params.with_genres).toBe('16');
+    expect(intent.params.with_keywords).toBeUndefined();
+  });
+
+  it('emits both movie and tv intents for a mixed filter, mapping tv genres', () => {
+    const intents = buildFillIntents(make(hints({ genres: ['scifi'] }), 'mixed'), false);
+    expect(intents.map(i => i.type)).toEqual(['movie', 'tv']);
+    expect(intents[0].params.with_genres).toBe('878');
+    expect(intents[1].params.with_genres).toBe('10765'); // sci-fi → TV sci-fi/fantasy bucket
+  });
+
+  it('applies a rating sort and explicit year bounds', () => {
+    const [intent] = buildFillIntents(make(hints({ genres: ['drama'], yearFrom: 1980, yearTo: 1999, sort: 'rating' })), false);
+    expect(intent.params.sort_by).toBe('vote_average.desc');
+    expect(intent.params['primary_release_date.gte']).toBe('1980-01-01');
+    expect(intent.params['primary_release_date.lte']).toBe('1999-12-31');
+  });
+
+  it('passes include_adult through', () => {
+    const [intent] = buildFillIntents(make(hints({ genres: ['comedy'] })), true);
+    expect(intent.params.include_adult).toBe('true');
   });
 });
 

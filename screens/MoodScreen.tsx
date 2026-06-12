@@ -25,12 +25,14 @@ import { itemToMovie } from '../utils/tmdb';
 import {
   askAI,
   parseDirectIntent,
+  buildFillIntents,
   isFreshnessQuery,
   isLikelyTitleMatch,
   isAdultQuery,
   adultSearchTerms,
   friendlyAiError,
   type AiTitle,
+  type GeminiResult,
 } from '../utils/aiSearch';
 import { TmdbFeed } from '../utils/tmdbFeed';
 import { logError } from '../utils/logger';
@@ -186,6 +188,43 @@ function buildDirectFeed(query: string, adultContent: boolean): TmdbFeed | null 
   return null;
 }
 
+// Resolve the AI's concept words ("isekai", "zombie", …) to TMDB keyword ids,
+// taking the top match per term. A term with no keyword is dropped and lookup
+// failures are swallowed, so the tail still falls back to genres. (Terms are
+// capped at 3 upstream, so this is at most 3 quick parallel lookups.)
+async function resolveKeywordIds(terms: string[], signal?: AbortSignal): Promise<number[]> {
+  const ids = await Promise.all(terms.map(async term => {
+    try {
+      const data = await fetchJson(tmdbUrls.searchKeyword(term), signal);
+      const top = (data.results || []).find((k: any) => typeof k?.id === 'number');
+      return top ? Number(top.id) : null;
+    } catch {
+      return null;
+    }
+  }));
+  return ids.filter((id): id is number => typeof id === 'number');
+}
+
+// Build the /discover "fill" feed from the AI's hints. Paged after the curated
+// title list runs out so results keep streaming from the real TMDB catalogue
+// instead of stopping at however many titles the model recalled. Prefers a
+// keyword feed (captures sub-genres/themes that aren't genres); falls back to
+// genres. null when the model gave no usable hints (then we stop at the titles).
+async function buildFillFeed(
+  aiResult: GeminiResult,
+  adultContent: boolean,
+  signal?: AbortSignal,
+): Promise<TmdbFeed | null> {
+  const keywords = aiResult.discover?.keywords ?? [];
+  const keywordIds = keywords.length ? await resolveKeywordIds(keywords, signal) : [];
+  const intents = buildFillIntents(aiResult, adultContent, keywordIds);
+  if (intents.length === 0) return null;
+  return new TmdbFeed(intents.map(intent => ({
+    makeUrl: (page: number) => tmdbUrls.discover(intent.type, { ...intent.params, page: String(page) }),
+    fixedType: intent.type,
+  })));
+}
+
 export default function MoodScreen({ navigation }: any) {
   const { adultContent } = useAppContext();
   const { columns, cardWidth } = useGridColumns();
@@ -218,6 +257,10 @@ export default function MoodScreen({ navigation }: any) {
   // structured /discover) instead of the AI title path. loadMoreResults pulls
   // the next page from it on scroll.
   const feedRef = useRef<TmdbFeed | null>(null);
+  // The AI path's /discover "fill" tail: once the curated title list is fully
+  // resolved, results keep streaming from this so a query isn't capped at the
+  // number of titles the model recalled. Built from the AI's discover hints.
+  const fillFeedRef = useRef<TmdbFeed | null>(null);
   const resolveCursorRef = useRef(0);
   // Sorting is applied to the currently loaded prefix only. Later infinite
   // scroll batches append below it, so cards already on screen do not jump.
@@ -365,13 +408,36 @@ export default function MoodScreen({ navigation }: any) {
     setResults(rebuildResults());
   };
 
+  // Curated titles are fully resolved. We're only truly done when there's no
+  // /discover fill tail left to stream — otherwise loadMoreResults takes over
+  // and keeps pulling TMDB pages, so leave allResolved false.
+  const markTitlesDone = () => {
+    if (!fillFeedRef.current || fillFeedRef.current.exhausted) setAllResolved(true);
+  };
+
+  // Pull one page from the /discover fill tail and append it. Excludes anything
+  // already shown from the title list (and user-hidden items) so the curated
+  // picks aren't duplicated below. Returns how many new items were added.
+  const loadFromFill = async (signal: AbortSignal): Promise<number> => {
+    const fill = fillFeedRef.current;
+    if (!fill || fill.exhausted) return 0;
+    const exclude = new Set<string>(hiddenKeysRef.current);
+    for (const it of slotsRef.current) if (it) exclude.add(`${it.id}-${it.media_type}`);
+    const fresh = await fill.loadNext(u => fetchJson(u, signal), exclude);
+    if (signal.aborted) return 0;
+    if (fresh.length) setResults(prev => [...prev, ...fresh]);
+    if (fill.total) setTotalAvailable(fill.total);
+    if (fill.exhausted) setAllResolved(true);
+    return fresh.length;
+  };
+
   // Resolve the next window of AI titles against TMDB (RESOLVE_BATCH at a time).
   // Initial search may stream into the empty grid; scroll-loaded batches flush
   // once at the end so the visible list stays anchored.
   const resolveNextBatch = async (signal: AbortSignal, stream = true) => {
     const titles = aiTitlesRef.current;
     const start = resolveCursorRef.current;
-    if (start >= titles.length) { setAllResolved(true); return; }
+    if (start >= titles.length) { markTitlesDone(); return; }
     const end = Math.min(start + RESOLVE_BATCH, titles.length);
     resolveCursorRef.current = end;
 
@@ -398,7 +464,7 @@ export default function MoodScreen({ navigation }: any) {
     );
     if (signal.aborted) return;
     flushStreaming(true); // trailing flush — final state must be exact, not throttled away
-    if (resolveCursorRef.current >= titles.length) setAllResolved(true);
+    if (resolveCursorRef.current >= titles.length) markTitlesDone();
   };
 
   const applySort = (nextSort: SortKey) => {
@@ -438,6 +504,7 @@ export default function MoodScreen({ navigation }: any) {
     setAllResolved(false);
     slotsRef.current = [];
     feedRef.current = null;
+    fillFeedRef.current = null;
     resolveCursorRef.current = 0;
     sortPinnedCountRef.current = 0;
     hiddenKeysRef.current = new Set();
@@ -482,13 +549,38 @@ export default function MoodScreen({ navigation }: any) {
       aiFilterRef.current = aiResult.mediaTypeFilter;
       slotsRef.current = new Array(aiResult.titles.length).fill(undefined);
       setTotalTitles(aiResult.titles.length);
+      // Build the /discover fill tail from the AI's hints, so once the curated
+      // titles run out the grid keeps streaming real TMDB titles instead of
+      // hitting the "however many the model recalled" ceiling. (Resolves concept
+      // keywords to TMDB ids first — a couple of quick lookups.)
+      fillFeedRef.current = await buildFillFeed(aiResult, adultContent, signal);
+      if (signal.aborted) return;
 
-      // Resolve the first page now; the rest stream in on scroll. Keep going if
-      // an early page yields nothing on TMDB, so the empty state stays honest
-      // (don't claim "nothing found" while later titles are still unresolved).
+      // Resolve enough titles up front to overflow the grid, then stream the
+      // rest in on scroll. Resolving only the first batch left low-hit-rate
+      // queries showing 3-4 cards in a grid too short to scroll — onEndReached
+      // never fired, so the remaining (still unresolved) titles were stranded
+      // and "Найдено: 3 из 58" got stuck. Fill a few screenfuls so scrolling
+      // works (or stop early once the title list runs out). columns*6 ≈ 6 rows.
+      const fillTarget = Math.max(RESOLVE_BATCH, columns * 6);
       await resolveNextBatch(signal);
-      while (!signal.aborted && rebuildResults().length === 0 && resolveCursorRef.current < aiTitlesRef.current.length) {
+      while (
+        !signal.aborted &&
+        rebuildResults().length < fillTarget &&
+        resolveCursorRef.current < aiTitlesRef.current.length
+      ) {
         await resolveNextBatch(signal);
+      }
+      // Titles ran out but the grid still isn't a screenful → start the TMDB
+      // fill now, so the list is long enough to scroll and onEndReached can take
+      // over. (bounded so a sparse filter can't spin forever.)
+      let shown = rebuildResults().length;
+      for (let guard = 0; guard < 8 && !signal.aborted && shown < fillTarget; guard += 1) {
+        const fill = fillFeedRef.current;
+        if (!fill || fill.exhausted) break;
+        const added = await loadFromFill(signal);
+        shown += added;
+        if (added === 0 && fill.exhausted) break;
       }
     } catch (e: any) {
       if (e?.name === 'AbortError') return;
@@ -519,8 +611,16 @@ export default function MoodScreen({ navigation }: any) {
         if (feed.exhausted) setAllResolved(true);
         return;
       }
-      if (resolveCursorRef.current >= aiTitlesRef.current.length) { setAllResolved(true); return; }
-      await resolveNextBatch(signal, false);
+      // Curated titles first; once they're exhausted, stream the /discover tail.
+      if (resolveCursorRef.current < aiTitlesRef.current.length) {
+        await resolveNextBatch(signal, false);
+        return;
+      }
+      if (fillFeedRef.current && !fillFeedRef.current.exhausted) {
+        await loadFromFill(signal);
+        return;
+      }
+      setAllResolved(true);
     } finally {
       if (!controller.signal.aborted) setResolvingMore(false);
     }
@@ -552,6 +652,7 @@ export default function MoodScreen({ navigation }: any) {
     findAbortRef.current?.abort();
     hiddenKeysRef.current = new Set();
     feedRef.current = null;
+    fillFeedRef.current = null;
     setShowInput(true);
     setResults([]);
     setMood('');

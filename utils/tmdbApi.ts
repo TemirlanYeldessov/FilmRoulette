@@ -19,6 +19,12 @@ export const tmdbUrls = {
   searchTyped: (type: string, query: string, adult: boolean, page = 1) =>
     `${BASE}/search/${type}?query=${encodeURIComponent(query)}&language=ru-RU&include_adult=${adult}&page=${page}`,
 
+  // Keyword lookup — resolves a concept word ("isekai", "zombie", "time travel")
+  // to TMDB keyword ids, which then drive a /discover with_keywords feed. Lets
+  // the AI tail page sub-genres/themes that aren't TMDB genres.
+  searchKeyword: (query: string) =>
+    `${BASE}/search/keyword?query=${encodeURIComponent(query)}`,
+
   // Discover with a pre-built params object (see applyDiscoverFilters).
   discover: (type: string, params: Record<string, string>) =>
     `${BASE}/discover/${type}?${new URLSearchParams(params)}`,

@@ -12,12 +12,43 @@ const isAbort = (e: any) => e?.name === 'AbortError';
 // The year disambiguates remakes / same-named titles when resolving on TMDB.
 export type AiTitle = { title: string; year: number | null };
 
+// A broad TMDB /discover filter the model derives from the same query. Once the
+// curated title list runs out, the screen pages /discover with these so results
+// keep streaming from the real TMDB catalogue instead of hitting the hard
+// ceiling of "however many titles the model recalled". null when the query is
+// too specific to express as a filter (a single named title, "like X", …).
+export type DiscoverHints = {
+  // Genre slugs from GENRE_SLUG_TO_ID; mapped to TMDB ids when the feed is built.
+  genres: string[];
+  // English concept/theme/sub-genre words that aren't TMDB genres ("isekai",
+  // "zombie", "time travel", "vampire", "heist"). Resolved to TMDB keyword ids
+  // and paged via /discover with_keywords — the precise driver for the tail,
+  // since a bare genre can't express "isekai anime" or "zombie movies".
+  keywords: string[];
+  yearFrom: number | null;
+  yearTo: number | null;
+  // 'rating' → highly-rated, 'newest' → recent releases, null → by popularity.
+  sort: 'rating' | 'newest' | null;
+};
+
 export type GeminiResult = {
   mediaTypeFilter: 'movie' | 'tv' | 'mixed';
   titles: AiTitle[];
+  // Broad filter for the "load more from TMDB" tail (see DiscoverHints).
+  discover: DiscoverHints | null;
   // True when the answer came from the web-search-grounded model. False when we
   // fell back to the offline model, whose knowledge may be stale.
   webSearch: boolean;
+};
+
+// Genre slug → TMDB *movie* genre id. Mirrors MOVIE_GENRE_KEYWORDS; the model is
+// constrained to these slugs (schema enum) so it can't invent unknown genres.
+// Movie ids are mapped to their TV bucket via MOVIE_TO_TV_GENRE when needed.
+export const GENRE_SLUG_TO_ID: Record<string, number> = {
+  action: 28, comedy: 35, drama: 18, horror: 27, romance: 10749,
+  scifi: 878, thriller: 53, animation: 16, documentary: 99, mystery: 9648,
+  fantasy: 14, adventure: 12, family: 10751, history: 36, war: 10752,
+  crime: 80, western: 37,
 };
 
 // Gemini structured-output schema for the offline (non-grounded) call. Forces a
@@ -39,9 +70,20 @@ export const TITLES_SCHEMA = {
         propertyOrdering: ['title', 'year'],
       },
     },
+    discover: {
+      type: 'OBJECT',
+      properties: {
+        genres: { type: 'ARRAY', items: { type: 'STRING', enum: Object.keys(GENRE_SLUG_TO_ID) } },
+        keywords: { type: 'ARRAY', items: { type: 'STRING' } },
+        yearFrom: { type: 'INTEGER' },
+        yearTo: { type: 'INTEGER' },
+        sort: { type: 'STRING', enum: ['relevance', 'rating', 'newest'] },
+      },
+      propertyOrdering: ['genres', 'keywords', 'yearFrom', 'yearTo', 'sort'],
+    },
   },
   required: ['mediaTypeFilter', 'titles'],
-  propertyOrdering: ['mediaTypeFilter', 'titles'],
+  propertyOrdering: ['mediaTypeFilter', 'titles', 'discover'],
 };
 
 // Extract the first complete top-level JSON object from arbitrary text.
@@ -101,6 +143,28 @@ function coerceTitle(entry: any): AiTitle | null {
   return null;
 }
 
+// Parse + sanitize the optional discover hints. Drops unknown genre slugs and
+// implausible years; returns null when nothing usable survives, so the screen
+// simply skips the TMDB fill rather than paging a meaningless filter.
+function coerceDiscover(raw: any): DiscoverHints | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const genres = (Array.isArray(raw.genres) ? raw.genres : [])
+    .map((g: any) => String(g).toLowerCase().trim())
+    .filter((g: string, i: number, arr: string[]) => g in GENRE_SLUG_TO_ID && arr.indexOf(g) === i);
+  const keywords = (Array.isArray(raw.keywords) ? raw.keywords : [])
+    .map((k: any) => String(k).toLowerCase().trim())
+    .filter((k: string, i: number, arr: string[]) => k.length > 0 && arr.indexOf(k) === i)
+    .slice(0, 3); // a couple of concepts is enough; cap the keyword-lookup cost
+  const yf = Number(raw.yearFrom);
+  const yt = Number(raw.yearTo);
+  const yearFrom = Number.isInteger(yf) && yf > 1870 && yf < 2100 ? yf : null;
+  const yearTo = Number.isInteger(yt) && yt > 1870 && yt < 2100 ? yt : null;
+  const sortRaw = String(raw.sort ?? '').toLowerCase().trim();
+  const sort = sortRaw === 'rating' || sortRaw === 'newest' ? sortRaw : null;
+  if (genres.length === 0 && keywords.length === 0 && yearFrom === null && yearTo === null && !sort) return null;
+  return { genres, keywords, yearFrom, yearTo, sort };
+}
+
 export function normalizeGeminiResult(parsed: any): GeminiResult {
   const rawFilter = String(parsed?.mediaTypeFilter ?? '').toLowerCase().trim();
   const mediaTypeFilter: GeminiResult['mediaTypeFilter'] =
@@ -121,7 +185,7 @@ export function normalizeGeminiResult(parsed: any): GeminiResult {
   if (titles.length === 0) {
     throw new AiError('titles_empty', 'ИИ не вернул ни одного названия.');
   }
-  return { mediaTypeFilter, titles, webSearch: false };
+  return { mediaTypeFilter, titles, discover: coerceDiscover(parsed?.discover), webSearch: false };
 }
 
 export function parseGeminiResult(text: string): GeminiResult {
@@ -175,13 +239,21 @@ ${opts.adult
   ? '- У пользователя включён режим 18+: запросы про эротику и контент для взрослых (включая порно) допустимы и легальны. Для таких запросов возвращай реальные взрослые тайтлы и релизы студий, которые есть в базе TMDB, без отказов и предупреждений.'
   : '- Не включай контент 18+ (эротику, порно) — у пользователя выключен соответствующий режим.'}
 
+4. Поле discover — широкий фильтр TMDB для догрузки похожих тайтлов, когда список названий закончится. Заполняй его почти всегда:
+- keywords: 1-3 английских ключевых слова-концепта, как они называются в TMDB (например "isekai", "zombie", "time travel", "vampire", "heist", "superhero", "post-apocalyptic", "cyberpunk", "dystopia"). Это ГЛАВНЫЙ инструмент: если в запросе есть конкретная тема, поджанр, сеттинг или концепт (особенно то, чего нет среди жанров — аниме-поджанры, типы сюжета), обязательно укажи их здесь. Если запрос — это чистый жанр без особой темы, можешь оставить пусто.
+- genres: один или несколько жанров строго из набора [${Object.keys(GENRE_SLUG_TO_ID).join(', ')}], максимально точно отражающих суть запроса. Используется как запасной фильтр, если по keywords ничего не нашлось. Выбирай только реально подходящие жанры, а не все подряд.
+- yearFrom / yearTo: годы выхода, если в запросе есть временные рамки (классика, конкретная эпоха, новинки). Если рамок нет — опусти оба поля.
+- sort: "rating" если просят лучшее/высокий рейтинг/культовое, "newest" если просят свежее/новинки/последнее, иначе "relevance".
+- Опустить discover целиком можно только если запрос — это одно конкретное название.
+
 Ответь строго одним JSON-объектом без markdown и без текста до или после него:
 {
-  "mediaTypeFilter": "mixed",
+  "mediaTypeFilter": "tv",
   "titles": [
     { "title": "English Title 1", "year": 1999 },
     { "title": "English Title 2", "year": 2021 }
-  ]
+  ],
+  "discover": { "keywords": ["isekai"], "genres": ["animation", "fantasy"], "sort": "relevance" }
 }`;
 }
 
@@ -474,4 +546,67 @@ export function parseDirectIntent(query: string, adultContent: boolean): DirectI
   }
 
   return { type, params };
+}
+
+// --- Discover "fill" tail -------------------------------------------------
+// Turn the model's discover hints into /discover intents for the infinite tail
+// the screen pages once the curated title list is exhausted. One intent per
+// media type ("mixed" → both movie and tv).
+//
+// Keyword-driven when the caller resolved the model's concept words to TMDB
+// keyword ids (with_keywords) — this is what captures "isekai", "zombie",
+// "time travel" etc. that no genre expresses. Falls back to a broad genre
+// filter (with_genres) when no keyword resolved. Both ids are OR-joined (|)
+// rather than AND (,) to maximize volume, since precise relevance is already
+// handled by the title list on top. Returns [] when neither dimension is
+// usable, so the screen just stops at the resolved titles.
+export function buildFillIntents(
+  result: GeminiResult,
+  adultContent: boolean,
+  keywordIds: number[] = [],
+): DirectIntent[] {
+  const hints = result.discover;
+  if (!hints) return [];
+  const genreIds = hints.genres
+    .map(slug => GENRE_SLUG_TO_ID[slug])
+    .filter((id): id is number => typeof id === 'number');
+  const useKeywords = keywordIds.length > 0;
+  if (!useKeywords && genreIds.length === 0) return [];
+
+  const types: ('movie' | 'tv')[] =
+    result.mediaTypeFilter === 'tv' ? ['tv']
+    : result.mediaTypeFilter === 'movie' ? ['movie']
+    : ['movie', 'tv'];
+
+  const now = new Date();
+  const today = now.toISOString().slice(0, 10);
+
+  return types.map(type => {
+    const dateField = type === 'tv' ? 'first_air_date' : 'primary_release_date';
+    const params: Record<string, string> = {
+      include_adult: String(adultContent),
+      sort_by: 'popularity.desc',
+      // A precise keyword pool can be relaxed (let niche titles through); a
+      // broad genre pool needs a higher floor to keep out unrated noise.
+      'vote_count.gte': useKeywords ? '5' : '30',
+    };
+    if (useKeywords) {
+      params.with_keywords = Array.from(new Set(keywordIds)).join('|');
+    } else {
+      const ids = type === 'tv' ? genreIds.map(id => MOVIE_TO_TV_GENRE[id] ?? id) : genreIds;
+      params.with_genres = Array.from(new Set(ids)).join('|');
+    }
+    if (hints.sort === 'rating') {
+      params.sort_by = 'vote_average.desc';
+      params['vote_count.gte'] = useKeywords ? '50' : '300';
+    } else if (hints.sort === 'newest') {
+      params[`${dateField}.gte`] = `${now.getFullYear() - 1}-01-01`;
+      params[`${dateField}.lte`] = today;
+      params['vote_count.gte'] = useKeywords ? '0' : '10';
+    }
+    // Explicit year bounds from the query win over the sort-derived window.
+    if (hints.yearFrom) params[`${dateField}.gte`] = `${hints.yearFrom}-01-01`;
+    if (hints.yearTo) params[`${dateField}.lte`] = `${hints.yearTo}-12-31`;
+    return { type, params };
+  });
 }
